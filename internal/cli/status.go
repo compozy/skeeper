@@ -22,18 +22,26 @@ func newStatusCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
 			if status.LastUnix > 0 {
 				age = time.Since(time.Unix(status.LastUnix, 0)).Round(time.Second).String() + " ago"
 			}
-			format := "sidecar:  %s\nbranch:   %s\nsynced:   %s  (%s)\nremote:   %s\n\n" +
+			format := "sidecar:  %s\nbranch:   %s\n"
+			args := []any{status.Sidecar, status.Branch}
+			if status.Directory != "" {
+				format += "directory: %s\nsidecar branch: %s\n"
+				args = append(args, status.Directory, status.SidecarBranch)
+			}
+			format += "synced:   %s  (%s)\nremote:   %s\n\n" +
 				"tracked files: %d\npending sync:  %d\n"
-			_, err = fmt.Fprintf(
-				stdout,
-				format,
-				status.Sidecar,
-				status.Branch,
+			args = append(
+				args,
 				emptyDefault(status.LastCommit, "none"),
 				age,
 				status.Remote,
 				status.TrackedFiles,
 				status.PendingSync,
+			)
+			_, err = fmt.Fprintf(
+				stdout,
+				format,
+				args...,
 			)
 			return err
 		},

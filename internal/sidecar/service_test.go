@@ -126,6 +126,116 @@ func TestServiceSyncMirrorsDeletes(t *testing.T) {
 	}
 }
 
+func TestServiceSyncUsesDirectoryNamespaceAndSidecarBranches(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	remote := newBareRepo(t)
+	service := sidecar.New(&gitexec.ExecRunner{})
+	repoA := newMainRepo(t)
+	repoB := newMainRepo(t)
+
+	bootstrapRepo(t, repoA, config.Config{
+		Sidecar:   remote,
+		Directory: "repo-a",
+		Patterns:  []string{"**/SPEC.md"},
+	})
+	bootstrapRepo(t, repoB, config.Config{
+		Sidecar:   remote,
+		Directory: "repo-b",
+		Patterns:  []string{"**/SPEC.md"},
+	})
+
+	writeFile(t, repoA, "src/auth/SPEC.md", "# Repo A\n")
+	if _, err := service.Sync(ctx, repoA, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync repo A: %v", err)
+	}
+	writeFile(t, repoB, "src/auth/SPEC.md", "# Repo B\n")
+	if _, err := service.Sync(ctx, repoB, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync repo B: %v", err)
+	}
+
+	assertSidecarFile(t, remote, "repo-a/__branches__/main", "repo-a/src/auth/SPEC.md", "# Repo A\n")
+	assertSidecarFile(t, remote, "repo-b/__branches__/main", "repo-b/src/auth/SPEC.md", "# Repo B\n")
+
+	status, err := service.Status(ctx, repoA)
+	if err != nil {
+		t.Fatalf("status repo A: %v", err)
+	}
+	if status.Directory != "repo-a" || status.SidecarBranch != "repo-a/__branches__/main" {
+		t.Fatalf("unexpected namespaced status: %#v", status)
+	}
+
+	logOutput, err := service.Log(ctx, repoA, "src/auth/SPEC.md")
+	if err != nil {
+		t.Fatalf("log repo A: %v", err)
+	}
+	if !strings.Contains(logOutput, "bootstrap") {
+		t.Fatalf("expected repo A sidecar history, got %q", logOutput)
+	}
+
+	if err := os.Remove(filepath.Join(repoA, "src/auth/SPEC.md")); err != nil {
+		t.Fatalf("remove repo A spec: %v", err)
+	}
+	if _, err := service.Sync(ctx, repoA, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("delete sync repo A: %v", err)
+	}
+	assertSidecarMissing(t, remote, "repo-a/__branches__/main", "repo-a/src/auth/SPEC.md")
+	assertSidecarFile(t, remote, "repo-b/__branches__/main", "repo-b/src/auth/SPEC.md", "# Repo B\n")
+
+	if err := os.RemoveAll(filepath.Join(repoB, sidecar.DirName)); err != nil {
+		t.Fatalf("remove repo B sidecar clone: %v", err)
+	}
+	if err := os.Remove(filepath.Join(repoB, "src/auth/SPEC.md")); err != nil {
+		t.Fatalf("remove repo B spec: %v", err)
+	}
+	hydrated, err := service.Hydrate(ctx, repoB)
+	if err != nil {
+		t.Fatalf("hydrate repo B: %v", err)
+	}
+	if len(hydrated.Restored) != 1 || hydrated.Restored[0] != "src/auth/SPEC.md" {
+		t.Fatalf("unexpected hydrated files: %#v", hydrated)
+	}
+	assertFile(t, filepath.Join(repoB, "src/auth/SPEC.md"), "# Repo B\n")
+}
+
+func TestServiceSyncPullRebasesNamespacedBranch(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	remote := newBareRepo(t)
+	root := newMainRepo(t)
+	cfg := config.Config{
+		Sidecar:   remote,
+		Directory: "repo-a",
+		Patterns:  []string{"**/SPEC.md"},
+	}
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	external := filepath.Join(t.TempDir(), "external")
+	git(t, "", "clone", remote, external)
+	git(t, external, "switch", "--track", "origin/repo-a/__branches__/main")
+	writeFile(t, external, "repo-a/external/SPEC.md", "# External\n")
+	git(t, external, "add", "repo-a/external/SPEC.md")
+	git(t, external, "commit", "-m", "external sidecar update")
+	git(t, external, "push", "origin", "repo-a/__branches__/main")
+
+	result, err := service.Sync(ctx, root, sidecar.SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("sync pull: %v", err)
+	}
+	if !result.Committed {
+		t.Fatal("expected sync pull to commit deletion of external-only spec")
+	}
+	assertSidecarMissing(t, remote, "repo-a/__branches__/main", "repo-a/external/SPEC.md")
+}
+
 func TestServiceHookSyncQueuesFailureWithoutReturningError(t *testing.T) {
 	root := newMainRepo(t)
 	cfg := config.Config{Sidecar: filepath.Join(t.TempDir(), "missing.git"), Patterns: []string{"**/SPEC.md"}}
@@ -148,6 +258,34 @@ func TestServiceHookSyncQueuesFailureWithoutReturningError(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "clone sidecar") {
 		t.Fatalf("expected clone failure reason in queue, got %s", string(data))
+	}
+}
+
+func bootstrapRepo(t *testing.T, root string, cfg config.Config) {
+	t.Helper()
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	writeFile(t, root, "README.md", "project\n")
+	git(t, root, "add", "README.md", config.Filename)
+	git(t, root, "commit", "-m", "bootstrap")
+}
+
+func assertSidecarFile(t *testing.T, remote, branch, path, want string) {
+	t.Helper()
+	got := gitOutput(t, "", "--git-dir", remote, "show", branch+":"+path)
+	want = strings.TrimSuffix(want, "\n")
+	if got != want {
+		t.Fatalf("sidecar file %s:%s mismatch: got %q want %q", branch, path, got, want)
+	}
+}
+
+func assertSidecarMissing(t *testing.T, remote, branch, path string) {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", "--git-dir", remote, "show", branch+":"+path)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected %s:%s to be absent, got %q", branch, path, string(out))
 	}
 }
 
@@ -218,6 +356,36 @@ func TestServiceInitUsesExistingCompatibleConfigIdempotently(t *testing.T) {
 	}
 	if !strings.Contains(string(hook), "skeeper sync --hook") {
 		t.Fatalf("expected hook to be installed, got %s", string(hook))
+	}
+}
+
+func TestServiceInitUsesExistingSidecarURLAndDefaultDirectory(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+
+	result, err := sidecar.New(&gitexec.ExecRunner{}).Init(ctx, root, sidecar.InitOptions{
+		Sidecar:  remote,
+		Patterns: []string{"**/SPEC.md"},
+	})
+	if err != nil {
+		t.Fatalf("init with existing sidecar URL: %v", err)
+	}
+	wantDirectory := sidecar.DefaultDirectory(filepath.Base(root))
+	if result.Config.Sidecar != remote || result.Config.Directory != wantDirectory {
+		t.Fatalf("unexpected config: %#v", result.Config)
+	}
+	if _, err := os.Stat(filepath.Join(root, sidecar.DirName, ".git")); err != nil {
+		t.Fatalf("expected sidecar clone: %v", err)
+	}
+	reloaded, err := config.Load(root)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Directory != wantDirectory {
+		t.Fatalf("expected directory %q, got %q", wantDirectory, reloaded.Directory)
 	}
 }
 

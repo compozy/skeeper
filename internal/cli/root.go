@@ -27,7 +27,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func newRootCmd(stdout, _ io.Writer) *cobra.Command {
+func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	service := sidecar.New(&gitexec.ExecRunner{})
 	cmd := &cobra.Command{
 		Use:           "skeeper",
@@ -36,7 +36,7 @@ func newRootCmd(stdout, _ io.Writer) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: false,
 	}
-	cmd.AddCommand(newInitCmd(stdout, service))
+	cmd.AddCommand(newInitCmd(stdout, stderr, service))
 	cmd.AddCommand(newHydrateCmd(stdout, service))
 	cmd.AddCommand(newSyncCmd(stdout, service))
 	cmd.AddCommand(newStatusCmd(stdout, service))

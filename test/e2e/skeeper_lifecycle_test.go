@@ -24,6 +24,7 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 		"--patterns", "**/SPEC.md",
 	)
 	env.assertContainsFile(filepath.Join(project, ".skeeper.yml"), "bootstrap: brew install")
+	env.assertContainsFile(filepath.Join(project, ".skeeper.yml"), "directory: project")
 	env.assertContainsFile(filepath.Join(project, ".gitignore"), ".skeeper/")
 	env.assertContainsFile(filepath.Join(project, ".gitignore"), "**/SPEC.md")
 	env.assertContainsFile(filepath.Join(project, ".git", "hooks", "post-commit"), "skeeper sync --hook")
@@ -49,10 +50,16 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 	if !strings.Contains(syncOut, "no spec changes") && !strings.Contains(syncOut, "synced 1 specs") {
 		t.Fatalf("unexpected sync output: %q", syncOut)
 	}
-	env.assertSidecarFile("main", "src/auth/SPEC.md", "# Auth spec\n\nOAuth provider design.\n")
-	env.assertSidecarMissing("main", "src/auth/service.go")
+	env.assertSidecarFile(
+		"project/__branches__/main",
+		"project/src/auth/SPEC.md",
+		"# Auth spec\n\nOAuth provider design.\n",
+	)
+	env.assertSidecarMissing("project/__branches__/main", "project/src/auth/service.go")
 
 	statusOut := env.run(project, "skeeper", "status")
+	env.assertOutputContains(statusOut, "directory: project")
+	env.assertOutputContains(statusOut, "sidecar branch: project/__branches__/main")
 	env.assertOutputContains(statusOut, "pending sync:  0")
 	env.assertOutputContains(statusOut, "tracked files: 1")
 	logOut := env.run(project, "skeeper", "log", "src/auth/SPEC.md")
@@ -63,6 +70,71 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 	env.run(fresh, "skeeper", "hydrate")
 	env.assertFile(filepath.Join(fresh, "src/auth/SPEC.md"), "# Auth spec\n\nOAuth provider design.\n")
 	env.assertContainsFile(filepath.Join(fresh, ".git", "hooks", "post-commit"), "skeeper sync --hook")
+}
+
+func TestSkeeperSharedSidecarDirectoryIsolationAcrossRepos(t *testing.T) {
+	env := newE2EEnv(t)
+	sharedRemote := env.newBareRepo("shared-specs.git")
+	alpha := env.newMainRepo("alpha")
+	beta := env.newMainRepo("beta")
+
+	env.run(alpha, "skeeper", "init",
+		"--sidecar", sharedRemote,
+		"--directory", "alpha",
+		"--patterns", "**/SPEC.md",
+	)
+	env.run(beta, "skeeper", "init",
+		"--sidecar", sharedRemote,
+		"--directory", "beta",
+		"--patterns", "**/SPEC.md",
+	)
+	env.assertContainsFile(filepath.Join(alpha, ".skeeper.yml"), "directory: alpha")
+	env.assertContainsFile(filepath.Join(beta, ".skeeper.yml"), "directory: beta")
+
+	env.writeFile(alpha, "README.md", "# alpha\n")
+	env.git(alpha, "add", "README.md", ".skeeper.yml", ".gitignore")
+	env.git(alpha, "commit", "-m", "bootstrap alpha")
+	env.writeFile(beta, "README.md", "# beta\n")
+	env.git(beta, "add", "README.md", ".skeeper.yml", ".gitignore")
+	env.git(beta, "commit", "-m", "bootstrap beta")
+
+	env.writeFile(alpha, "src/auth/service.go", "package auth\n")
+	env.writeFile(alpha, "src/auth/SPEC.md", "# Alpha spec\n")
+	env.git(alpha, "add", "src/auth/service.go")
+	env.git(alpha, "commit", "-m", "alpha: add auth")
+	env.run(alpha, "skeeper", "sync")
+	env.writeFile(beta, "src/billing/service.go", "package billing\n")
+	env.writeFile(beta, "src/billing/SPEC.md", "# Beta spec\n")
+	env.git(beta, "add", "src/billing/service.go")
+	env.git(beta, "commit", "-m", "beta: add billing")
+	env.run(beta, "skeeper", "sync")
+
+	env.assertSidecarFileFromRemote(sharedRemote, "alpha/__branches__/main", "alpha/src/auth/SPEC.md", "# Alpha spec\n")
+	env.assertSidecarFileFromRemote(sharedRemote, "beta/__branches__/main", "beta/src/billing/SPEC.md", "# Beta spec\n")
+	env.assertSidecarMissingFromRemote(sharedRemote, "alpha/__branches__/main", "beta/src/billing/SPEC.md")
+
+	if err := os.Remove(filepath.Join(alpha, "src/auth/SPEC.md")); err != nil {
+		t.Fatalf("remove alpha spec: %v", err)
+	}
+	env.writeFile(alpha, "src/auth/service.go", "package auth\n\nconst version = 2\n")
+	env.git(alpha, "add", "src/auth/service.go")
+	env.git(alpha, "commit", "-m", "alpha: remove auth spec")
+	env.run(alpha, "skeeper", "sync")
+	env.assertSidecarMissingFromRemote(sharedRemote, "alpha/__branches__/main", "alpha/src/auth/SPEC.md")
+	env.assertSidecarFileFromRemote(sharedRemote, "beta/__branches__/main", "beta/src/billing/SPEC.md", "# Beta spec\n")
+
+	statusOut := env.run(beta, "skeeper", "status")
+	env.assertOutputContains(statusOut, "directory: beta")
+	env.assertOutputContains(statusOut, "sidecar branch: beta/__branches__/main")
+
+	if err := os.RemoveAll(filepath.Join(beta, ".skeeper")); err != nil {
+		t.Fatalf("remove beta sidecar clone: %v", err)
+	}
+	if err := os.Remove(filepath.Join(beta, "src/billing/SPEC.md")); err != nil {
+		t.Fatalf("remove beta spec: %v", err)
+	}
+	env.run(beta, "skeeper", "hydrate")
+	env.assertFile(filepath.Join(beta, "src/billing/SPEC.md"), "# Beta spec\n")
 }
 
 func TestSkeeperSyncFlushesQueuedHookPushFailure(t *testing.T) {
@@ -95,7 +167,7 @@ func TestSkeeperSyncFlushesQueuedHookPushFailure(t *testing.T) {
 	env.assertOutputContains(statusOut, "pending sync:  1")
 	env.assertOutputContains(statusOut, "remote:   not pushed")
 	env.run(project, "skeeper", "sync")
-	env.assertSidecarFile("main", "src/auth/SPEC.md", "# Queued auth spec\n")
+	env.assertSidecarFile("project/__branches__/main", "project/src/auth/SPEC.md", "# Queued auth spec\n")
 	if _, err := os.Stat(filepath.Join(project, ".git", "skeeper", "queue.json")); !os.IsNotExist(err) {
 		t.Fatalf("expected retry queue to be cleared, stat err=%v", err)
 	}
@@ -215,7 +287,12 @@ func (e *e2eEnv) writeFile(root, rel, content string) {
 
 func (e *e2eEnv) assertSidecarFile(branch, path, want string) {
 	e.t.Helper()
-	got := e.gitOutput("", "--git-dir", e.sidecarRemote, "show", branch+":"+path)
+	e.assertSidecarFileFromRemote(e.sidecarRemote, branch, path, want)
+}
+
+func (e *e2eEnv) assertSidecarFileFromRemote(remote, branch, path, want string) {
+	e.t.Helper()
+	got := e.gitOutput("", "--git-dir", remote, "show", branch+":"+path)
 	if got != want {
 		e.t.Fatalf("sidecar file %s mismatch: got %q want %q", path, got, want)
 	}
@@ -223,9 +300,14 @@ func (e *e2eEnv) assertSidecarFile(branch, path, want string) {
 
 func (e *e2eEnv) assertSidecarMissing(branch, path string) {
 	e.t.Helper()
+	e.assertSidecarMissingFromRemote(e.sidecarRemote, branch, path)
+}
+
+func (e *e2eEnv) assertSidecarMissingFromRemote(remote, branch, path string) {
+	e.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "--git-dir", e.sidecarRemote, "show", branch+":"+path)
+	cmd := exec.CommandContext(ctx, "git", "--git-dir", remote, "show", branch+":"+path)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		e.t.Fatalf("expected %s to be absent from sidecar, got output %q", path, string(out))

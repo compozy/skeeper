@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -15,11 +16,15 @@ import (
 const (
 	// Filename is the committed project config file.
 	Filename = ".skeeper.yml"
+	// DirectoryBranchSegment separates a sidecar directory namespace from
+	// branch-specific sidecar refs.
+	DirectoryBranchSegment = "__branches__"
 )
 
 // Config describes how a project mirrors spec files into its sidecar repo.
 type Config struct {
 	Sidecar   string   `yaml:"sidecar"`
+	Directory string   `yaml:"directory,omitempty"`
 	Bootstrap string   `yaml:"bootstrap,omitempty"`
 	Patterns  []string `yaml:"patterns"`
 }
@@ -55,19 +60,24 @@ func Load(root string) (Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
+	cfg, err = cfg.Normalize()
+	if err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
 // Save writes cfg to .skeeper.yml under root.
 func Save(root string, cfg Config) error {
-	if err := cfg.Validate(); err != nil {
+	normalized, err := cfg.Normalize()
+	if err != nil {
 		return err
 	}
 
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	if err := enc.Encode(cfg); err != nil {
+	if err := enc.Encode(normalized); err != nil {
 		return fmt.Errorf("encode %s: %w", Filename, err)
 	}
 	if err := enc.Close(); err != nil {
@@ -95,22 +105,101 @@ func writeFile(path string, data []byte, perm os.FileMode) error {
 
 // Validate checks that the config can drive deterministic v1 behavior.
 func (c Config) Validate() error {
+	_, err := c.Normalize()
+	return err
+}
+
+// Normalize validates cfg and returns the canonical config values that should
+// drive runtime behavior.
+func (c Config) Normalize() (Config, error) {
 	if strings.TrimSpace(c.Sidecar) == "" {
-		return errors.New("sidecar is required")
+		return Config{}, errors.New("sidecar is required")
 	}
 	if len(c.Patterns) == 0 {
-		return errors.New("patterns must contain at least one glob")
+		return Config{}, errors.New("patterns must contain at least one glob")
+	}
+	directory, err := CleanDirectory(c.Directory)
+	if err != nil {
+		return Config{}, err
 	}
 	seen := make(map[string]struct{}, len(c.Patterns))
 	for i, pattern := range c.Patterns {
 		trimmed := strings.TrimSpace(pattern)
 		if trimmed == "" {
-			return fmt.Errorf("patterns[%d] is empty", i)
+			return Config{}, fmt.Errorf("patterns[%d] is empty", i)
 		}
 		if _, ok := seen[trimmed]; ok {
-			return fmt.Errorf("patterns[%d] duplicates %q", i, trimmed)
+			return Config{}, fmt.Errorf("patterns[%d] duplicates %q", i, trimmed)
 		}
 		seen[trimmed] = struct{}{}
 	}
-	return nil
+	c.Directory = directory
+	return c, nil
+}
+
+// CleanDirectory validates a sidecar directory namespace and returns its
+// canonical slash-separated form. The empty string is valid legacy behavior.
+func CleanDirectory(directory string) (string, error) {
+	trimmed := strings.TrimSpace(directory)
+	if trimmed == "" {
+		return "", nil
+	}
+	if strings.Contains(trimmed, "\\") {
+		return "", errors.New("directory must use slash-separated path segments")
+	}
+	if path.IsAbs(trimmed) || strings.HasPrefix(trimmed, "/") {
+		return "", errors.New("directory must be relative")
+	}
+	if strings.HasPrefix(trimmed, "./") || strings.HasSuffix(trimmed, "/") ||
+		strings.Contains(trimmed, "//") {
+		return "", fmt.Errorf("directory %q is not a clean relative path", directory)
+	}
+	cleaned := path.Clean(trimmed)
+	if cleaned != trimmed {
+		return "", fmt.Errorf("directory %q is not a clean relative path", directory)
+	}
+	for segment := range strings.SplitSeq(cleaned, "/") {
+		if segment == "." || segment == ".." {
+			return "", fmt.Errorf("directory contains invalid segment %q", segment)
+		}
+		if strings.HasPrefix(segment, ".") {
+			return "", fmt.Errorf("directory segment %q cannot start with dot", segment)
+		}
+		if segment == DirectoryBranchSegment {
+			return "", fmt.Errorf("directory segment %q is reserved", DirectoryBranchSegment)
+		}
+		if reservedDirectorySegment(segment) {
+			return "", fmt.Errorf("directory segment %q is reserved for Git internals", segment)
+		}
+		if !safeDirectorySegment(segment) {
+			return "", fmt.Errorf("directory segment %q contains unsupported characters", segment)
+		}
+	}
+	return cleaned, nil
+}
+
+func reservedDirectorySegment(segment string) bool {
+	switch strings.ToLower(segment) {
+	case "head", "config", "hooks", "index", "info", "logs", "objects", "packed-refs", "refs":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeDirectorySegment(segment string) bool {
+	if segment == "" {
+		return false
+	}
+	for _, r := range segment {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
