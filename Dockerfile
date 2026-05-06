@@ -31,18 +31,18 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
             -X github.com/compozy/skeeper/internal/version.Version=${VERSION} \
             -X github.com/compozy/skeeper/internal/version.Commit=${COMMIT} \
             -X github.com/compozy/skeeper/internal/version.BuildDate=${BUILD_DATE}" \
-        -o /out/app \
+        -o /out/skeeper \
         ./cmd/skeeper
 
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 WORKDIR /app
 
-COPY --from=builder /out/app /usr/local/bin/app
+COPY --from=builder /out/skeeper /usr/local/bin/skeeper
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
 USER nonroot:nonroot
 
-ENTRYPOINT ["/usr/local/bin/app"]
+ENTRYPOINT ["/usr/local/bin/skeeper"]
 CMD ["run"]

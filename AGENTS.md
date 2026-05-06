@@ -30,13 +30,13 @@ This file provides project guidance for coding agents working in this repository
 
 ## Package Layout
 
-| Path               | Responsibility                                     |
-| ------------------ | -------------------------------------------------- |
+| Path               | Responsibility                                               |
+| ------------------ | ------------------------------------------------------------ |
 | `cmd/skeeper`      | CLI entry point — thin shim that delegates to `internal/cli` |
-| `internal/cli`     | Cobra root command, subcommand wiring, exit-code mapping |
-| `internal/config`  | Config loading and validation                      |
-| `internal/version` | Build metadata (Version, Commit, BuildDate via -X) |
-| `internal/logger`  | Structured logging setup                           |
+| `internal/cli`     | Cobra root command, subcommand wiring, exit-code mapping     |
+| `internal/config`  | Config loading and validation                                |
+| `internal/version` | Build metadata (Version, Commit, BuildDate via -X)           |
+| `internal/logger`  | Structured logging setup                                     |
 
 ## Build & Development Commands
 
@@ -173,33 +173,33 @@ Scan the task description and target files to determine which domains are involv
 
 Use the `Skill` tool to activate every skill that matches the identified domains:
 
-| Domain                       | Required Skills                                | Conditional Skills              |
-| ---------------------------- | ---------------------------------------------- | ------------------------------- |
-| Go / Runtime                 | `golang-pro`                                   | `context7` (external libs)      |
-| CLI / Cobra                  | `golang-pro`                                   |                                 |
-| TUI                          | `golang-pro` + `bubbletea`                     |                                 |
-| Concurrency                  | `golang-pro` + `deadlock-finder-and-fixer`     |                                 |
-| Config / Logging             | `golang-pro`                                   |                                 |
-| Bug fix                      | `systematic-debugging` + `no-workarounds`      | `testing-anti-patterns`         |
-| Writing tests                | `testing-anti-patterns` + `golang-pro`         |                                 |
-| Task completion              | `verification-before-completion`               |                                 |
-| Architecture audit           | `architectural-analysis`                       | `adversarial-review`            |
-| Refactoring                  | `refactoring-analysis`                         | `golang-pro`                    |
-| Performance                  | `extreme-software-optimization`                | `golang-pro`                    |
-| Security review              | `security-review`                              |                                 |
-| Creative / new features      | `brainstorming`                                |                                 |
-| Spec authoring (PRD)         | `cy-create-prd`                                | `cy-spec-preflight`             |
-| Spec authoring (Techspec)    | `cy-create-techspec` + `cy-spec-preflight`     | `cy-spec-peer-review`           |
-| Task breakdown               | `cy-create-tasks`                              |                                 |
-| Task execution               | `cy-execute-task`                              | `cy-workflow-memory`            |
-| Final verification           | `cy-final-verify` + `verification-before-completion` |                           |
-| Code review (round / impl)   | `cy-review-round` / `cy-impl-peer-review`      |                                 |
-| Fixing review feedback       | `cy-fix-reviews`                               | `coderabbit-review`             |
-| Documentation                | `documentation-writer`                         | `crafting-effective-readmes`    |
-| Diagrams                     | `mermaid-diagrams` / `architecture-diagram`    |                                 |
-| Git rebase / conflicts       | `git-rebase`                                   |                                 |
-| Lessons / postmortems        | `lesson-learned`                               |                                 |
-| Skill discovery / writing    | `find-skills` / `skill-writer`                 | `skill-best-practices`          |
+| Domain                     | Required Skills                                      | Conditional Skills           |
+| -------------------------- | ---------------------------------------------------- | ---------------------------- |
+| Go / Runtime               | `golang-pro`                                         | `context7` (external libs)   |
+| CLI / Cobra                | `golang-pro`                                         |                              |
+| TUI                        | `golang-pro` + `bubbletea`                           |                              |
+| Concurrency                | `golang-pro` + `deadlock-finder-and-fixer`           |                              |
+| Config / Logging           | `golang-pro`                                         |                              |
+| Bug fix                    | `systematic-debugging` + `no-workarounds`            | `testing-anti-patterns`      |
+| Writing tests              | `testing-anti-patterns` + `golang-pro`               |                              |
+| Task completion            | `verification-before-completion`                     |                              |
+| Architecture audit         | `architectural-analysis`                             | `adversarial-review`         |
+| Refactoring                | `refactoring-analysis`                               | `golang-pro`                 |
+| Performance                | `extreme-software-optimization`                      | `golang-pro`                 |
+| Security review            | `security-review`                                    |                              |
+| Creative / new features    | `brainstorming`                                      |                              |
+| Spec authoring (PRD)       | `cy-create-prd`                                      | `cy-spec-preflight`          |
+| Spec authoring (Techspec)  | `cy-create-techspec` + `cy-spec-preflight`           | `cy-spec-peer-review`        |
+| Task breakdown             | `cy-create-tasks`                                    |                              |
+| Task execution             | `cy-execute-task`                                    | `cy-workflow-memory`         |
+| Final verification         | `cy-final-verify` + `verification-before-completion` |                              |
+| Code review (round / impl) | `cy-review-round` / `cy-impl-peer-review`            |                              |
+| Fixing review feedback     | `cy-fix-reviews`                                     | `coderabbit-review`          |
+| Documentation              | `documentation-writer`                               | `crafting-effective-readmes` |
+| Diagrams                   | `mermaid-diagrams` / `architecture-diagram`          |                              |
+| Git rebase / conflicts     | `git-rebase`                                         |                              |
+| Lessons / postmortems      | `lesson-learned`                                     |                              |
+| Skill discovery            | `find-skills`                                        | `skill-best-practices`       |
 
 ### Step 3: Verify Before Completion
 

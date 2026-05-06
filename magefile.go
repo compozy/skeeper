@@ -105,7 +105,7 @@ func Cover() error {
 	return sh.RunV("go", "tool", "cover", "-html="+coverageOut, "-o", coverageHTML)
 }
 
-// Build compiles the application binary into bin/app with version ldflags.
+// Build compiles the application binary into bin/skeeper with version ldflags.
 func Build() error {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return err
