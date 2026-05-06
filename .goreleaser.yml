@@ -1,0 +1,167 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=jcroql
+version: 2
+
+project_name: skeeper
+
+env:
+  - GO111MODULE=on
+  - CGO_ENABLED=0
+
+before:
+  hooks:
+    - go mod tidy
+
+git:
+  tag_sort: -version:refname
+
+builds:
+  - id: skeeper
+    main: ./cmd/skeeper
+    binary: skeeper
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X github.com/compozy/skeeper/internal/version.Version={{ .Version }}
+      - -X github.com/compozy/skeeper/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/compozy/skeeper/internal/version.BuildDate={{ .Date }}
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: skeeper-archive
+    builds_info:
+      group: skeeper
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- with .Arm }}v{{ . }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "0.0.0-{{ .Timestamp }}"
+
+source:
+  enabled: true
+
+changelog:
+  use: git
+  sort: asc
+  abbrev: 7
+  groups:
+    - title: "Features"
+      regexp: "^.*feat[\\(\\w)]*:+.*$"
+      order: 0
+    - title: "Bug Fixes"
+      regexp: "^.*fix[\\(\\w)]*:+.*$"
+      order: 1
+    - title: "Performance"
+      regexp: "^.*perf[\\(\\w)]*:+.*$"
+      order: 2
+    - title: "Security"
+      regexp: "^.*security[\\(\\w)]*:+.*$"
+      order: 3
+    - title: "Documentation"
+      regexp: "^.*docs[\\(\\w)]*:+.*$"
+      order: 4
+    - title: "Refactoring"
+      regexp: "^.*refactor[\\(\\w)]*:+.*$"
+      order: 5
+    - title: "Testing"
+      regexp: "^.*test[\\(\\w)]*:+.*$"
+      order: 6
+    - title: "Other Changes"
+      order: 999
+  filters:
+    exclude:
+      - "^(build|ci): "
+      - "^chore: "
+      - "^chore\\(deps\\): "
+      - "^docs: update$"
+      - "merge conflict"
+      - Merge branch
+      - Merge pull request
+      - Merge remote-tracking branch
+      - go mod tidy
+      - "^wip "
+      - "^wip:"
+
+release:
+  github:
+    owner: compozy
+    name: skeeper
+  name_template: "Release {{ .Version }}"
+  mode: replace
+  replace_existing_artifacts: true
+  draft: false
+  prerelease: auto
+
+# Optional distribution channels (commented as placeholders).
+# Uncomment and configure when you are ready to ship via these channels.
+#
+# nfpms:
+#   - id: app-linux-packages
+#     package_name: app
+#     file_name_template: "{{ .ConventionalFileName }}"
+#     ids:
+#       - app
+#     vendor: Your Org
+#     homepage: https://example.com
+#     maintainer: Your Team <team@example.com>
+#     description: Brief description of the binary
+#     license: MIT
+#     bindir: /usr/bin
+#     section: utils
+#     priority: optional
+#     formats:
+#       - deb
+#       - rpm
+#
+# brews:
+#   - name: app
+#     ids:
+#       - app-archive
+#     repository:
+#       owner: your-org
+#       name: homebrew-tap
+#       branch: main
+#       token: "{{ .Env.RELEASE_TOKEN }}"
+#     homepage: https://example.com
+#     description: Brief description of the binary
+#
+# signs:
+#   - cmd: cosign
+#     certificate: "${artifact}.pem"
+#     args:
+#       - sign-blob
+#       - "--output-certificate=${certificate}"
+#       - "--output-signature=${signature}"
+#       - "${artifact}"
+#       - "--yes"
+#     artifacts: checksum
+#     output: true
+#
+# sboms:
+#   - artifacts: archive
+#   - artifacts: source

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp /Users/pedronauck/dev/compozy/agh/cliff.toml /Users/pedronauck/Dev/projects/skeeper/cliff.toml)",
+      "Bash(cp /Users/pedronauck/dev/compozy/agh/.vscode/extensions.json /Users/pedronauck/Dev/projects/skeeper/.vscode/extensions.json)"
+    ]
+  }
+}

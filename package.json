@@ -1,0 +1,29 @@
+{
+  "name": "skeeper",
+  "private": true,
+  "scripts": {
+    "prepare": "husky",
+    "lint": "bun run format && bunx oxlint --no-error-on-unmatched-pattern '**/*.{ts,tsx,js,jsx,mjs,cjs}'",
+    "format": "bunx oxfmt",
+    "format:check": "bunx oxfmt --check"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^20.5.0",
+    "@commitlint/config-conventional": "^20.5.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "oxfmt": "^0.45.0",
+    "oxlint": "^1.60.0"
+  },
+  "lint-staged": {
+    "*.go": "make fmt",
+    "*.{js,jsx,ts,tsx}": [
+      "oxfmt --no-error-on-unmatched-pattern",
+      "oxlint"
+    ],
+    "*.{css,html,json,jsonc,yaml,yml,md}": [
+      "oxfmt --no-error-on-unmatched-pattern"
+    ]
+  },
+  "packageManager": "bun@1.3.4"
+}

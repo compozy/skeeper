@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CGO_ENABLED: 0
+  BUN_VERSION: "1.3.4"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      tooling: ${{ steps.filter.outputs.tooling }}
+      relevant: ${{ steps.filter.outputs.backend == 'true' || steps.filter.outputs.tooling == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Filter paths
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          backend=false
+          tooling=false
+          zero_sha='0000000000000000000000000000000000000000'
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            backend=true
+            tooling=true
+          else
+            if [[ "$EVENT_NAME" == "pull_request" && -n "$PR_BASE_SHA" && -n "$PR_HEAD_SHA" ]]; then
+              changed_files=$(git diff --name-only "$PR_BASE_SHA" "$PR_HEAD_SHA")
+            elif [[ -n "${PUSH_BEFORE_SHA:-}" && "$PUSH_BEFORE_SHA" != "$zero_sha" ]]; then
+              changed_files=$(git diff --name-only "$PUSH_BEFORE_SHA" "$CURRENT_SHA")
+            else
+              changed_files=$(git ls-tree -r --name-only "$CURRENT_SHA")
+            fi
+
+            while IFS= read -r file; do
+              [[ -z "$file" ]] && continue
+
+              case "$file" in
+                *.go|go.mod|go.sum|Makefile|magefile.go|.golangci.yml|.goreleaser.yml|cliff.toml)
+                  backend=true
+                  ;;
+                cmd/*|internal/*)
+                  backend=true
+                  ;;
+                .github/*|.go-version|mise.toml|.editorconfig)
+                  tooling=true
+                  ;;
+                .bun-version|.oxfmtrc.json|.oxlintrc.json|.commitlintrc.yaml|package.json|bun.lock|.husky/*)
+                  tooling=true
+                  ;;
+              esac
+            done <<< "$changed_files"
+          fi
+
+          relevant=false
+          if [[ "$backend" == "true" || "$tooling" == "true" ]]; then
+            relevant=true
+          fi
+
+          {
+            echo "backend=$backend"
+            echo "tooling=$tooling"
+            echo "relevant=$relevant"
+          } >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify (fmt, lint, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+        with:
+          install-tools: "true"
+
+      - name: Set up Bun
+        uses: ./.github/actions/setup-bun
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Run verification pipeline
+        run: make verify
+        env:
+          CGO_ENABLED: 0
+
+      - name: Run JS/TS lint (oxfmt + oxlint)
+        run: bun run lint
+
+      - name: Upload verify artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-artifacts
+          path: |
+            coverage.out
+            coverage.html
+            bin
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,0 +1,10 @@
+[tools]
+go = "1.26.2"
+bun = "1.3.4"
+"go:github.com/magefile/mage" = "v1.17.0"
+"go:gotest.tools/gotestsum" = "v1.13.0"
+"go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint" = "v2.11.4"
+"go:github.com/goreleaser/goreleaser/v2" = "v2.6.1"
+
+[env]
+CGO_ENABLED = "0"
