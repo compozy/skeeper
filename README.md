@@ -1,141 +1,303 @@
-# skeeper
+<div align="center">
+  <h1>skeeper</h1>
+  <p><strong>Version your spec artifacts — PRDs, tech specs, ADRs, AI plans — in a sidecar Git repository, without polluting your main PRs.</strong></p>
+  <p>
+    <a href="https://github.com/compozy/skeeper/actions/workflows/ci.yml">
+      <img src="https://github.com/compozy/skeeper/actions/workflows/ci.yml/badge.svg" alt="CI">
+    </a>
+    <a href="https://pkg.go.dev/github.com/compozy/skeeper">
+      <img src="https://pkg.go.dev/badge/github.com/compozy/skeeper.svg" alt="Go Reference">
+    </a>
+    <a href="https://goreportcard.com/report/github.com/compozy/skeeper">
+      <img src="https://goreportcard.com/badge/github.com/compozy/skeeper" alt="Go Report Card">
+    </a>
+    <a href="LICENSE">
+      <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT">
+    </a>
+    <a href="https://github.com/compozy/skeeper/releases">
+      <img src="https://img.shields.io/github/v/release/compozy/skeeper?include_prereleases" alt="Release">
+    </a>
+  </p>
+</div>
 
-`skeeper` versions Spec-Driven Development artifacts in a sidecar Git repository so specs stay reproducible without polluting the main project PR.
+Specs and code want to live together. Spec files (`SPEC.md`, `docs/specs/*`, `.claude/plans/*`, ADRs, RFCs) belong next to the code they describe — but committing them to your main repo bloats every PR with documentation noise, and ignoring them loses history. `skeeper` runs a sidecar Git repository that mirrors matched spec files on every commit. You edit specs at their natural paths, your main PRs stay focused on code, and a separate Git history keeps full `git log`, `git blame`, and branch-aware versioning of every spec change. One `skeeper init` and the post-commit hook does the rest — without ever blocking your `git commit`.
 
-- Pinned **Go 1.26.2** via `mise.toml` + `.go-version`
-- Zero-tolerance **golangci-lint v2** with 21 linters + gofmt/goimports/golines
-- `gopls` modernize analyzer integrated into `make lint`
-- Race-enabled tests via `gotestsum`, coverage via `make cover`
-- **Cobra** CLI (`cmd/skeeper` → `internal/cli`)
-- `.skeeper.yml` project config, `.skeeper/` sidecar clone, `.git/skeeper/` local sync state
-- Shell-backed `git` and `gh` integration for debuggable repository operations
-- **Husky + lint-staged + commitlint + oxfmt + oxlint** for non-Go files and commit hygiene
-- **GoReleaser** multi-arch release pipeline
-- **GitHub Actions** CI (detect-changes + verify) and Release (tag-driven)
-- **Distroless multi-stage Dockerfile** with version ldflags injection
-- **CodeRabbit** review config (`.coderabbit.yaml`)
-- 30+ curated AI agent skills + 5 archetype agents wired under `.claude/`
+## ✨ Highlights
 
-## Prerequisites
+- **One sidecar repo, full Git history.** Specs version normally — `git log`, `git blame`, branches, PRs — without touching your main repo's diff.
+- **Edit specs where they belong.** Spec files stay next to the code they describe. `skeeper` mirrors them into `.skeeper/` for you.
+- **A post-commit hook that never breaks your commit.** 750 ms foreground budget; on failure, the sync queues locally and retries on the next manual `skeeper sync`.
+- **Branch-aware mirroring.** Sidecar branches track main-tree branches, so feature work and `main` stay isolated.
+- **Fresh-clone hydration.** `skeeper hydrate` restores matched specs into a new clone so teammates start with full context.
+- **Glob-based pattern matching.** Doublestar globs (`**/SPEC.md`, `docs/specs/**`, `.claude/plans/**`) — match specs the way you actually organize them.
+- **Shells out to `git` and `gh`.** Reuses your existing GitHub auth. Every operation is debuggable with the same Git commands you already know.
+- **Single static binary, zero runtime deps.** Linux, macOS, Windows on amd64/arm64. CGO disabled.
 
-- [mise](https://mise.jdx.dev/) (recommended) or Go 1.26.2 + Bun 1.3.4
-- `git`, `gh`, `make`
+## 📦 Installation
 
-## Quick Start
-
-```bash
-mise trust && mise install
-bun install
-make hooks-install
-make verify
-```
-
-## Commands
-
-### Go pipeline
-
-```bash
-make deps             # go mod tidy
-make fmt              # gofmt every .go file
-make lint             # golangci-lint v2 + gopls modernize (auto-fix)
-make modernize        # gopls modernize idioms only
-make test             # gotestsum + -race -parallel=4
-make test-integration # tests with `-tags integration`
-make cover            # coverage.out + coverage.html
-make build            # bin/skeeper with version ldflags
-make verify           # fmt -> lint -> test -> build (BLOCKING gate)
-make tools            # install gotestsum, golangci-lint, modernize, goreleaser
-```
-
-### JS/TS toolchain
+#### Go
 
 ```bash
-make bun-lint        # oxfmt + oxlint over non-Go files
-make bun-fmt         # apply oxfmt formatting
-make bun-fmt-check   # check oxfmt without writing
+go install github.com/compozy/skeeper/cmd/skeeper@latest
 ```
 
-### Release & containers
+#### From Source
 
 ```bash
-make release-snapshot # local goreleaser snapshot under dist/
-make docker-build     # docker build -t skeeper:dev .
+git clone git@github.com:compozy/skeeper.git
+cd skeeper && make verify && go build -o bin/skeeper ./cmd/skeeper
 ```
 
-## CLI Usage
+#### Docker
 
 ```bash
-go run ./cmd/skeeper --help
-go run ./cmd/skeeper version
-go run ./cmd/skeeper init
-go run ./cmd/skeeper hydrate
-go run ./cmd/skeeper sync
-go run ./cmd/skeeper status
-go run ./cmd/skeeper log src/auth/SPEC.md
+git clone git@github.com:compozy/skeeper.git
+cd skeeper && make docker-build      # builds skeeper:dev (distroless, nonroot)
+docker run --rm -v "$PWD:/workspace" -w /workspace skeeper:dev status
 ```
 
-## Sidecar Workflow
+#### Prerequisites
 
-Run `skeeper init` once in a project. It creates a private GitHub sidecar repository with `gh repo create`, clones it into `.skeeper/`, writes `.skeeper.yml`, adds `.skeeper/` and the configured spec patterns to `.gitignore`, and installs a managed post-commit hook.
+- `git` on `PATH`
+- `gh` (GitHub CLI) **only for `skeeper init`** — the sidecar repo is created with `gh repo create`. Day-to-day commands need only `git`.
 
-The committed config file looks like this:
+## 🔄 How It Works
+
+Spec files live at their natural paths next to code. Your main repo's `.gitignore` lists those patterns plus `.skeeper/`, so neither the specs nor the sidecar clone ever appear in a main-repo diff.
+
+On every `git commit`, the managed post-commit hook runs `skeeper sync --hook` with a 750 ms foreground budget. `skeeper` matches files against your patterns, copies them into `.skeeper/`, commits with a reference to the main commit SHA, and pushes to the sidecar remote.
+
+If anything fails — network, auth, push rejection, timeout — `skeeper` writes a retry record to `.git/skeeper/queue.json`, appends a one-line audit entry to `.git/skeeper/sync.log`, and exits 0 so your `git commit` always succeeds. Run `skeeper sync` later to drain the queue.
+
+```mermaid
+flowchart LR
+    A[Developer<br/>git commit] --> B[post-commit hook<br/>skeeper sync --hook]
+    B --> C{Sync within<br/>750 ms?}
+    C -- yes --> D[Copy matched specs<br/>into .skeeper/]
+    D --> E[git commit<br/>in sidecar]
+    E --> F[git push<br/>to sidecar remote]
+    C -- no / error --> G[Write retry record<br/>.git/skeeper/queue.json]
+    G --> H[Hook exits 0<br/>main commit succeeds]
+    H -. later .-> I[skeeper sync<br/>drains queue]
+    I --> D
+```
+
+## ⚙️ Configuration
+
+`skeeper init` writes `.skeeper.yml` at the repo root. Commit it — your teammates need it for `skeeper hydrate`.
 
 ```yaml
+# Required: sidecar repository URL
 sidecar: git@github.com:user/myproject-specs.git
-bootstrap: brew install user/tap/skeeper
+
+# Required: doublestar globs that select spec files
 patterns:
   - "**/SPEC.md"
   - "docs/specs/**"
   - ".claude/plans/**"
   - "**/*.spec.md"
+
+# Optional: install one-liner shown to teammates after `skeeper hydrate`
+bootstrap: brew install user/tap/skeeper
 ```
 
-Developers edit specs at their natural paths beside code. On `git commit`, the hook runs `skeeper sync --hook` with a short foreground budget. The hook always exits successfully; network or auth failures are queued under `.git/skeeper/` and can be retried with `skeeper sync`.
+Unknown keys are rejected — config errors fail loud, not silently.
 
-Fresh clones run `skeeper hydrate` to clone `.skeeper/`, restore matched specs into the main working tree, and install the hook.
+Local-only state lives under `.git/skeeper/` (already gitignored by Git's hooks directory):
 
-## Project Layout
+| File         | Purpose                                                |
+| ------------ | ------------------------------------------------------ |
+| `queue.json` | Pending retries from failed hook runs                  |
+| `sync.log`   | Append-only audit log of sync attempts and error codes |
 
-```
-cmd/skeeper/       CLI entrypoint (thin shim into internal/cli)
-internal/cli/      Cobra root + sidecar subcommands
-internal/config/   .skeeper.yml config loading and validation
-internal/gitexec/  Context-aware git and gh process runner
-internal/hooks/    Managed post-commit hook installation
-internal/matcher/  Doublestar spec-file discovery
-internal/sidecar/  Clone, hydrate, sync, status, and log orchestration
-internal/state/    Local queue and sync log under .git/skeeper/
-internal/version/  Build metadata injection (Version, Commit, BuildDate)
-.agents/skills/    Curated agent skills (real folders)
-.claude/skills/    Symlinks into .agents/skills/ (Claude Code compatibility)
-.claude/agents/    Decision-archetype agents (architect, devil's advocate, ...)
+## 🚀 Quick Start
+
+### 1. Install
+
+```bash
+go install github.com/compozy/skeeper/cmd/skeeper@latest
 ```
 
-## Conventional Commits
+### 2. Initialize the sidecar
 
-Commit-msg hook enforces Conventional Commits. Allowed types:
+In a Git repo where you want to track specs:
 
+```bash
+skeeper init
 ```
-build, chore, ci, docs, feat, fix, perf, refactor, test
+
+Interactive by default — prompts for the sidecar repo name and spec patterns. Or pass them as flags:
+
+```bash
+skeeper init \
+  --sidecar-name myproject-specs \
+  --visibility private \
+  --patterns "**/SPEC.md" \
+  --patterns ".claude/plans/**"
 ```
 
-## Release Flow
+`skeeper init` creates the GitHub repo with `gh repo create`, clones it into `.skeeper/`, writes `.skeeper.yml`, updates `.gitignore`, and installs the post-commit hook.
 
-Tag-driven. Push a `v*` tag to trigger goreleaser:
+### 3. Edit specs and commit normally
+
+```bash
+$EDITOR src/auth/SPEC.md
+git add .
+git commit -m "auth: design OAuth provider flow"
+```
+
+The hook fires automatically. No extra step.
+
+### 4. Inspect
+
+```bash
+skeeper status                       # sidecar URL, branch, last sync, pending count
+skeeper log src/auth/SPEC.md         # sidecar Git history for one file
+```
+
+### 5. Onboard a teammate
+
+```bash
+git clone git@github.com:user/myproject.git
+cd myproject
+skeeper hydrate
+```
+
+`hydrate` clones the sidecar into `.skeeper/`, restores matched specs into the working tree, and installs the hook.
+
+### 6. Recover from a failed sync
+
+If the hook ever queued work (network blip, push rejection):
+
+```bash
+skeeper sync           # drain queued retries, then run a fresh sync
+skeeper sync --pull    # rebase the sidecar branch first — useful when teammates pushed
+```
+
+## 🧰 How Sync Works
+
+The post-commit hook is a _managed block_ in `.git/hooks/post-commit`, installed idempotently. It runs `skeeper sync --hook` with a 750 ms foreground budget so your `git commit` stays snappy even on a slow network.
+
+On the success path, `skeeper` matches files with doublestar globs, copies them into `.skeeper/`, then runs `git add`, `git commit`, and `git push` against the sidecar remote. Sidecar commits reference the main-repo SHA so you can correlate spec changes back to the code change that triggered them.
+
+On the failure path — timeout, auth failure, network failure, or push rejection — `skeeper` writes a retry record to `.git/skeeper/queue.json`, appends to `.git/skeeper/sync.log`, prints a one-line note, and the hook exits 0. The next `skeeper sync` drains the queue before running a normal sync. Use `skeeper sync --pull` when a teammate pushed sidecar updates between your commits; it fetches and rebases before pushing.
+
+This design has two consequences worth knowing:
+
+- **`git commit` never fails because of `skeeper`.** Worst case, you have queued work to drain.
+- **Conflicts surface as Git conflicts.** `skeeper sync --pull` stops if the rebase reports unresolved conflicts; resolve them in `.skeeper/` with normal Git tooling, then re-run.
+
+## 📖 CLI Reference
+
+<details>
+<summary><code>skeeper init</code> — Create and connect a sidecar specs repository</summary>
+
+```bash
+skeeper init [flags]
+```
+
+| Flag             | Default   | Description                                           |
+| ---------------- | --------- | ----------------------------------------------------- |
+| `--sidecar-name` |           | GitHub sidecar repository name or `OWNER/REPO`        |
+| `--visibility`   | `private` | GitHub visibility: `private`, `public`, or `internal` |
+| `--bootstrap`    |           | Optional install command stored in `.skeeper.yml`     |
+| `--patterns`     |           | Spec glob pattern; repeat for multiple patterns       |
+
+When run interactively, `init` prompts for any flag you didn't supply. It then runs `gh repo create`, clones the new repo into `.skeeper/`, writes `.skeeper.yml`, updates `.gitignore`, and installs the post-commit hook.
+
+</details>
+
+<details>
+<summary><code>skeeper hydrate</code> — Restore spec files from the sidecar repository</summary>
+
+```bash
+skeeper hydrate
+```
+
+Use after a fresh clone of the main repo. `hydrate` clones the sidecar into `.skeeper/`, copies matched spec files into the working tree, and installs the post-commit hook. No flags.
+
+</details>
+
+<details>
+<summary><code>skeeper sync</code> — Mirror spec files into the sidecar repository</summary>
+
+```bash
+skeeper sync [flags]
+```
+
+| Flag     | Default | Description                                                            |
+| -------- | ------- | ---------------------------------------------------------------------- |
+| `--pull` | `false` | Pull and rebase the sidecar branch before syncing                      |
+| `--hook` | `false` | Run in post-commit hook mode: 750 ms foreground budget, always exits 0 |
+
+Drains queued retries from `.git/skeeper/queue.json`, then mirrors spec files into `.skeeper/`, commits, and pushes. Use `--pull` when teammates may have pushed sidecar updates between your commits. `--hook` is what the installed post-commit hook calls — you rarely run it manually.
+
+</details>
+
+<details>
+<summary><code>skeeper status</code> — Show sidecar sync status</summary>
+
+```bash
+skeeper status
+```
+
+Prints the sidecar URL, current branch, last sync commit and age, remote URL, count of tracked spec files, and count of pending queued syncs. No flags.
+
+</details>
+
+<details>
+<summary><code>skeeper log &lt;path&gt;</code> — Show sidecar history for a spec file</summary>
+
+```bash
+skeeper log <path>
+```
+
+Runs `git log` against the sidecar for one spec file. The path is relative to the main repo root, e.g. `skeeper log src/auth/SPEC.md`.
+
+</details>
+
+<details>
+<summary><code>skeeper version</code> — Print build metadata</summary>
+
+```bash
+skeeper version
+```
+
+Prints `Version`, `Commit`, and `BuildDate` injected at build time via ldflags.
+
+</details>
+
+## 🛠️ Development
+
+```bash
+mise install      # provision Go 1.26.2, Bun 1.3.4, and CLI tools
+bun install
+make hooks-install
+make verify       # fmt → lint → test → build (BLOCKING gate)
+```
+
+Common targets:
+
+```bash
+make fmt          # gofmt every .go file
+make lint         # golangci-lint v2 + gopls modernize (zero tolerance)
+make test         # gotestsum + -race -parallel=4
+make build        # bin/skeeper with version ldflags
+make cover        # coverage.out + coverage.html
+```
+
+Releases are tag-driven via [GoReleaser](.goreleaser.yml) — push a `v*` tag to publish multi-OS/arch binaries to GitHub Releases:
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-Optional channels (Homebrew tap, deb/rpm, cosign, SBOMs) are scaffolded as commented blocks in `.goreleaser.yml`.
+Contributor guidance, commit conventions, and the agent skill dispatch protocol live in [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md).
 
-## Agent Tooling
+## 🤝 Contributing
 
-- `CLAUDE.md` / `AGENTS.md` — coding style, skill dispatch protocol, anti-patterns
-- `.agents/skills/` — 30+ curated skills (Go, TUI, debugging, testing, security, docs, spec authoring, code review)
-- `.claude/agents/` — 5 decision archetypes for advisory passes
-- `.coderabbit.yaml` — automated PR review config with test-file enforcement rules
+Contributions are welcome. Open an issue to discuss larger changes, or send a pull request for fixes and small improvements. All commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `test`), enforced by `commitlint`.
 
-## License
+## 📄 License
 
-[Choose your license]
+[MIT](LICENSE)
