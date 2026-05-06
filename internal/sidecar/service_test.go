@@ -308,7 +308,7 @@ func newMainRepo(t *testing.T) string {
 func newBareRepo(t *testing.T) string {
 	t.Helper()
 	remote := filepath.Join(t.TempDir(), "sidecar.git")
-	git(t, "", "init", "--bare", remote)
+	git(t, "", "init", "--bare", "--initial-branch=main", remote)
 	return remote
 }
 

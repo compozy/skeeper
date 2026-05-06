@@ -130,6 +130,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "global-gitconfig"))
 	t.Setenv("GIT_AUTHOR_NAME", "skeeper e2e")
 	t.Setenv("GIT_AUTHOR_EMAIL", "skeeper-e2e@example.com")
@@ -153,7 +154,7 @@ set -eu
 printf '%s\n' "$*" >> "$GH_LOG"
 if [ "$1" = "repo" ] && [ "$2" = "create" ]; then
   if [ ! -d "$GH_REMOTE" ]; then
-    git init --bare "$GH_REMOTE" >/dev/null
+    git init --bare --initial-branch=main "$GH_REMOTE" >/dev/null
   fi
   exit 0
 fi
@@ -184,7 +185,7 @@ func (e *e2eEnv) newMainRepo(name string) string {
 func (e *e2eEnv) newBareRepo(name string) string {
 	e.t.Helper()
 	path := filepath.Join(e.root, name)
-	e.git("", "init", "--bare", path)
+	e.git("", "init", "--bare", "--initial-branch=main", path)
 	return path
 }
 
