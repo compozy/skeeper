@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/compozy/skeeper/internal/managedblock"
 )
 
 const (
@@ -34,7 +36,7 @@ func InstallPostCommit(gitDir string) error {
 		return fmt.Errorf("read post-commit hook: %w", err)
 	}
 
-	next := replaceManagedBlock(string(content))
+	next := managedblock.Replace(string(content), beginMarker, endMarker)
 	if strings.TrimSpace(next) == "" {
 		next = "#!/bin/sh\n\n" + hookBody
 	} else {
@@ -47,40 +49,11 @@ func InstallPostCommit(gitDir string) error {
 		next += "\n" + hookBody
 	}
 
-	if err := writeFile(path, []byte(next), 0o600); err != nil {
+	if err := managedblock.WriteFile(path, []byte(next), 0o600); err != nil {
 		return fmt.Errorf("write post-commit hook: %w", err)
 	}
 	if err := os.Chmod(path, 0o700); err != nil {
 		return fmt.Errorf("mark post-commit hook executable: %w", err)
 	}
 	return nil
-}
-
-func writeFile(path string, data []byte, perm os.FileMode) error {
-	file, err := os.OpenFile(filepath.Clean(path), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
-}
-
-func replaceManagedBlock(content string) string {
-	start := strings.Index(content, beginMarker)
-	if start == -1 {
-		return content
-	}
-	end := strings.Index(content[start:], endMarker)
-	if end == -1 {
-		return content
-	}
-	end += start + len(endMarker)
-	if end < len(content) && content[end] == '\n' {
-		end++
-	}
-	trimmed := content[:start] + content[end:]
-	return strings.TrimRight(trimmed, "\n")
 }

@@ -1,95 +1,113 @@
 package inittui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/compozy/skeeper/internal/sidecar"
 )
 
-func TestModelSubmitsDefaultDirectory(t *testing.T) {
+func TestFormStateOptionsSubmitDefaultDirectory(t *testing.T) {
 	t.Parallel()
 
-	model := NewModel(sidecar.InitDefaults{
+	state := newFormState(sidecar.InitDefaults{
 		SidecarName: "project-specs",
 		Visibility:  "private",
 		Directory:   "project",
 		Patterns:    []string{"**/SPEC.md"},
 	})
-	updated, _ := model.submit()
-	model = updated.(Model)
-
-	if !model.submitted {
-		t.Fatal("expected form to submit")
+	opts, err := state.options()
+	if err != nil {
+		t.Fatalf("options: %v", err)
 	}
-	if model.options.SidecarName != "project-specs" {
-		t.Fatalf("unexpected sidecar name %q", model.options.SidecarName)
+	if opts.SidecarName != "project-specs" {
+		t.Fatalf("unexpected sidecar name %q", opts.SidecarName)
 	}
-	if model.options.Directory != "project" || !model.options.DirectorySet || model.options.NoDirectory {
-		t.Fatalf("unexpected directory options: %#v", model.options)
+	if opts.Visibility != "private" {
+		t.Fatalf("unexpected visibility %q", opts.Visibility)
 	}
-	if len(model.options.Patterns) != 1 || model.options.Patterns[0] != "**/SPEC.md" {
-		t.Fatalf("unexpected patterns: %#v", model.options.Patterns)
+	if opts.Directory != "project" || !opts.DirectorySet || opts.NoDirectory {
+		t.Fatalf("unexpected directory options: %#v", opts)
+	}
+	if len(opts.Patterns) != 1 || opts.Patterns[0] != "**/SPEC.md" {
+		t.Fatalf("unexpected patterns: %#v", opts.Patterns)
 	}
 }
 
-func TestModelExistingSidecarRequiresNoDirectoryConfirmation(t *testing.T) {
+func TestFormStateOptionsExistingSidecarRequiresNoDirectoryConfirmation(t *testing.T) {
 	t.Parallel()
 
-	model := NewModel(sidecar.InitDefaults{
+	state := newFormState(sidecar.InitDefaults{
 		SidecarName: "project-specs",
 		Visibility:  "private",
 		Directory:   "project",
 		Patterns:    []string{"**/SPEC.md"},
 	})
-	model.toggleMode()
-	input := model.inputs[inputSidecarURL]
-	input.SetValue("git@github.com:org/shared-specs.git")
-	model.inputs[inputSidecarURL] = input
-	directory := model.inputs[inputDirectory]
-	directory.SetValue("")
-	model.inputs[inputDirectory] = directory
+	state.mode = initModeExisting
+	state.sidecarURL = "git@github.com:org/shared-specs.git"
+	state.directory = ""
 
-	updated, _ := model.submit()
-	model = updated.(Model)
-	if model.submitted {
-		t.Fatal("expected first submit to stop at warning")
-	}
-	if !model.confirmNoDirectory {
-		t.Fatal("expected no-directory warning confirmation")
+	if _, err := state.options(); err == nil || !strings.Contains(err.Error(), "confirm no-directory") {
+		t.Fatalf("expected no-directory confirmation error, got %v", err)
 	}
 
-	updated, _ = model.submit()
-	model = updated.(Model)
-	if !model.submitted {
-		t.Fatal("expected second submit to continue")
+	state.confirmNoDirectory = true
+	opts, err := state.options()
+	if err != nil {
+		t.Fatalf("options after confirmation: %v", err)
 	}
-	if model.options.Sidecar != "git@github.com:org/shared-specs.git" {
-		t.Fatalf("unexpected sidecar URL %q", model.options.Sidecar)
+	if opts.Sidecar != "git@github.com:org/shared-specs.git" {
+		t.Fatalf("unexpected sidecar URL %q", opts.Sidecar)
 	}
-	if !model.options.NoDirectory || model.options.DirectorySet || model.options.Directory != "" {
-		t.Fatalf("unexpected directory opt-out options: %#v", model.options)
+	if !opts.NoDirectory || opts.DirectorySet || opts.Directory != "" {
+		t.Fatalf("unexpected directory opt-out options: %#v", opts)
 	}
 }
 
-func TestModelRejectsInvalidDirectoryBeforeSubmit(t *testing.T) {
+func TestFormStateOptionsRejectsInvalidDirectory(t *testing.T) {
 	t.Parallel()
 
-	model := NewModel(sidecar.InitDefaults{
+	state := newFormState(sidecar.InitDefaults{
 		SidecarName: "project-specs",
 		Visibility:  "private",
 		Directory:   "project",
 		Patterns:    []string{"**/SPEC.md"},
 	})
-	directory := model.inputs[inputDirectory]
-	directory.SetValue("../outside")
-	model.inputs[inputDirectory] = directory
+	state.directory = "../outside"
 
-	updated, _ := model.submit()
-	model = updated.(Model)
-	if model.submitted {
-		t.Fatal("did not expect invalid directory to submit")
+	if _, err := state.options(); err == nil {
+		t.Fatal("expected invalid directory error, got nil")
 	}
-	if model.errorMessage == "" {
-		t.Fatal("expected validation error message")
+}
+
+func TestFormStateOptionsRequiresExistingSidecarURL(t *testing.T) {
+	t.Parallel()
+
+	state := newFormState(sidecar.InitDefaults{
+		SidecarName: "project-specs",
+		Visibility:  "private",
+		Directory:   "project",
+		Patterns:    []string{"**/SPEC.md"},
+	})
+	state.mode = initModeExisting
+
+	if _, err := state.options(); err == nil || !strings.Contains(err.Error(), "sidecar URL is required") {
+		t.Fatalf("expected sidecar URL error, got %v", err)
+	}
+}
+
+func TestFormStateOptionsRequiresPatterns(t *testing.T) {
+	t.Parallel()
+
+	state := newFormState(sidecar.InitDefaults{
+		SidecarName: "project-specs",
+		Visibility:  "private",
+		Directory:   "project",
+		Patterns:    []string{"**/SPEC.md"},
+	})
+	state.patterns = " , "
+
+	if _, err := state.options(); err == nil || !strings.Contains(err.Error(), "patterns") {
+		t.Fatalf("expected patterns error, got %v", err)
 	}
 }

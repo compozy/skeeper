@@ -1,6 +1,7 @@
 package state
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ func TestQueueLifecycleAndLog(t *testing.T) {
 	if err := store.Enqueue(entry); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
+	assertFileMode(t, filepath.Join(store.dir, queueFile), 0o600)
 	queue, err := store.Queue()
 	if err != nil {
 		t.Fatalf("read queue: %v", err)
@@ -32,6 +34,7 @@ func TestQueueLifecycleAndLog(t *testing.T) {
 	if err := store.AppendLog("queued sync: network"); err != nil {
 		t.Fatalf("append log: %v", err)
 	}
+	assertFileMode(t, filepath.Join(store.dir, logFile), 0o600)
 	if err := store.ClearQueue(); err != nil {
 		t.Fatalf("clear queue: %v", err)
 	}
@@ -41,5 +44,16 @@ func TestQueueLifecycleAndLog(t *testing.T) {
 	}
 	if len(cleared) != 0 {
 		t.Fatalf("expected cleared queue, got %d", len(cleared))
+	}
+}
+
+func assertFileMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("mode mismatch for %s: got %o want %o", path, got, want)
 	}
 }

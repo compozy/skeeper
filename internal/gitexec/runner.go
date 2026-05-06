@@ -38,12 +38,17 @@ func (r *ExecRunner) Run(ctx context.Context, dir, name string, args ...string) 
 	err := cmd.Run()
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String()}
 	if err != nil {
+		exitCode := -1
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		}
 		return result, &CommandError{
-			Name:   name,
-			Args:   append([]string(nil), args...),
-			Dir:    dir,
-			Stderr: strings.TrimSpace(result.Stderr),
-			Err:    err,
+			Name:     name,
+			Args:     append([]string(nil), args...),
+			Dir:      dir,
+			Stderr:   strings.TrimSpace(result.Stderr),
+			ExitCode: exitCode,
+			Err:      err,
 		}
 	}
 	return result, nil
@@ -55,7 +60,9 @@ type CommandError struct {
 	Args   []string
 	Dir    string
 	Stderr string
-	Err    error
+	// ExitCode is the process exit code, or -1 when unavailable.
+	ExitCode int
+	Err      error
 }
 
 // Error returns a concise command failure message.

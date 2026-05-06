@@ -45,7 +45,7 @@ func (s *Store) Enqueue(entry Entry) error {
 	if err != nil {
 		return fmt.Errorf("encode sync queue: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(s.dir, queueFile), append(data, '\n'), 0o600); err != nil {
+	if err := atomicWriteFile(filepath.Join(s.dir, queueFile), append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write sync queue: %w", err)
 	}
 	return nil
@@ -97,13 +97,56 @@ func (s *Store) ensureDir() error {
 }
 
 func appendFile(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	if _, err := file.Write(data); err != nil {
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
 		return err
 	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := file.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := file.Chmod(perm); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	cleanup = false
 	return nil
 }

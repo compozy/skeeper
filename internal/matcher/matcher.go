@@ -2,40 +2,80 @@
 package matcher
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/compozy/skeeper/internal/managedblock"
+	"github.com/git-pkgs/gitignore"
 )
 
-var excludedPrefixes = []string{
-	".git/",
-	".skeeper/",
+var excludedDirs = map[string]struct{}{
+	".git":     {},
+	".skeeper": {},
 }
+
+const globalExcludesProbeTimeout = time.Second
 
 // Find returns sorted slash-separated relative file paths that match patterns.
 func Find(root string, patterns []string) ([]string, error) {
-	fsys := os.DirFS(root)
+	return FindContext(context.Background(), root, patterns)
+}
+
+// FindContext returns sorted slash-separated relative file paths that match patterns.
+func FindContext(ctx context.Context, root string, patterns []string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	normalized, err := normalizePatterns(patterns)
+	if err != nil {
+		return nil, err
+	}
+	ignored, err := newIgnoredMatcher(ctx, root)
+	if err != nil {
+		return nil, err
+	}
 	seen := make(map[string]struct{})
-	for _, raw := range patterns {
-		pattern := normalizePattern(raw)
-		if !doublestar.ValidatePathPattern(pattern) {
-			return nil, fmt.Errorf("invalid glob pattern %q", raw)
+
+	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		matches, err := doublestar.Glob(fsys, pattern, doublestar.WithFilesOnly())
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(root, path)
 		if err != nil {
-			return nil, fmt.Errorf("match pattern %q: %w", raw, err)
+			return err
 		}
-		for _, match := range matches {
-			path := filepath.ToSlash(filepath.Clean(match))
-			if path == "." || excluded(path) {
-				continue
+		if rel == "." {
+			return nil
+		}
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		if entry.IsDir() {
+			if excluded(rel) || ignored.MatchPath(rel, true) {
+				return filepath.SkipDir
 			}
-			seen[path] = struct{}{}
+			loadNestedIgnore(root, rel, ignored)
+			return nil
 		}
+		if excluded(rel) || ignored.MatchPath(rel, false) {
+			return nil
+		}
+		if matchesAny(rel, normalized) {
+			seen[rel] = struct{}{}
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("walk project files: %w", err)
 	}
 
 	files := make([]string, 0, len(seen))
@@ -46,6 +86,78 @@ func Find(root string, patterns []string) ([]string, error) {
 	return files, nil
 }
 
+func newIgnoredMatcher(ctx context.Context, root string) (*gitignore.Matcher, error) {
+	ignored := gitignore.New("")
+	if global := globalExcludesFile(ctx); global != "" {
+		ignored.AddFromFile(global, "")
+	}
+	ignored.AddFromFile(filepath.Join(root, ".git", "info", "exclude"), "")
+	data, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	switch {
+	case err == nil:
+		content := removeSkeeperIgnoreBlock(string(data))
+		ignored.AddPatterns([]byte(content), "")
+	case errors.Is(err, fs.ErrNotExist):
+	default:
+		return nil, fmt.Errorf("read .gitignore: %w", err)
+	}
+	return ignored, nil
+}
+
+func loadNestedIgnore(root, rel string, ignored *gitignore.Matcher) {
+	path := filepath.Join(root, filepath.FromSlash(rel), ".gitignore")
+	if _, err := os.Stat(path); err == nil {
+		ignored.AddFromFile(path, rel)
+	}
+}
+
+func globalExcludesFile(ctx context.Context) string {
+	cmdCtx, cancel := context.WithTimeout(ctx, globalExcludesProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(cmdCtx, "git", "config", "--global", "core.excludesfile").Output()
+	if err == nil {
+		path := strings.TrimSpace(string(out))
+		if path != "" {
+			return expandTilde(path)
+		}
+	}
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "git", "ignore")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "git", "ignore")
+}
+
+func expandTilde(path string) string {
+	if !strings.HasPrefix(path, "~") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[1:])
+}
+
+func removeSkeeperIgnoreBlock(content string) string {
+	return managedblock.Replace(content, managedblock.SkeeperGitignoreBegin, managedblock.SkeeperGitignoreEnd)
+}
+
+func normalizePatterns(patterns []string) ([]string, error) {
+	normalized := make([]string, 0, len(patterns))
+	for _, raw := range patterns {
+		pattern := normalizePattern(raw)
+		if !doublestar.ValidatePathPattern(pattern) {
+			return nil, fmt.Errorf("invalid glob pattern %q", raw)
+		}
+		normalized = append(normalized, pattern)
+	}
+	return normalized, nil
+}
+
 func normalizePattern(pattern string) string {
 	trimmed := strings.TrimSpace(filepath.ToSlash(pattern))
 	trimmed = strings.TrimPrefix(trimmed, "./")
@@ -53,8 +165,15 @@ func normalizePattern(pattern string) string {
 }
 
 func excluded(path string) bool {
-	for _, prefix := range excludedPrefixes {
-		if strings.HasPrefix(path, prefix) {
+	first, _, _ := strings.Cut(path, "/")
+	_, ok := excludedDirs[first]
+	return ok
+}
+
+func matchesAny(path string, patterns []string) bool {
+	for _, pattern := range patterns {
+		ok, err := doublestar.PathMatch(pattern, path)
+		if err == nil && ok {
 			return true
 		}
 	}

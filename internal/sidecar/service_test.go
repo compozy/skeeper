@@ -236,6 +236,86 @@ func TestServiceSyncPullRebasesNamespacedBranch(t *testing.T) {
 	assertSidecarMissing(t, remote, "repo-a/__branches__/main", "repo-a/external/SPEC.md")
 }
 
+func TestServiceStatusReportsRemoteState(t *testing.T) {
+	setGitIdentity(t)
+
+	tests := []struct {
+		name  string
+		want  string
+		setup func(*testing.T, statusFixture)
+	}{
+		{
+			name: "not pushed",
+			want: "not pushed",
+		},
+		{
+			name: "in sync",
+			want: "in sync",
+			setup: func(t *testing.T, fixture statusFixture) {
+				t.Helper()
+				git(t, fixture.sidecarDir, "push", "-u", "origin", "main")
+			},
+		},
+		{
+			name: "ahead",
+			want: "ahead by 1 commit(s)",
+			setup: func(t *testing.T, fixture statusFixture) {
+				t.Helper()
+				git(t, fixture.sidecarDir, "push", "-u", "origin", "main")
+				commitSidecarFile(t, fixture.sidecarDir, "local/SPEC.md", "# Local\n", "local sidecar update")
+			},
+		},
+		{
+			name: "behind",
+			want: "behind by 1 commit(s)",
+			setup: func(t *testing.T, fixture statusFixture) {
+				t.Helper()
+				git(t, fixture.sidecarDir, "push", "-u", "origin", "main")
+				base := gitOutput(t, fixture.sidecarDir, "rev-parse", "HEAD")
+				remoteCommit := commitFromCurrentTree(t, fixture.sidecarDir, base, "remote sidecar update")
+				git(t, fixture.sidecarDir, "push", "origin", remoteCommit+":refs/heads/main")
+			},
+		},
+		{
+			name: "diverged",
+			want: "diverged (ahead 1, behind 1)",
+			setup: func(t *testing.T, fixture statusFixture) {
+				t.Helper()
+				git(t, fixture.sidecarDir, "push", "-u", "origin", "main")
+				base := gitOutput(t, fixture.sidecarDir, "rev-parse", "HEAD")
+				commitSidecarFile(t, fixture.sidecarDir, "local/SPEC.md", "# Local\n", "local sidecar update")
+				remoteCommit := commitFromCurrentTree(t, fixture.sidecarDir, base, "remote sidecar update")
+				git(t, fixture.sidecarDir, "push", "origin", remoteCommit+":refs/heads/main")
+			},
+		},
+		{
+			name: "unknown fetch failure",
+			want: "unknown",
+			setup: func(t *testing.T, fixture statusFixture) {
+				t.Helper()
+				missingRemote := filepath.Join(t.TempDir(), "missing.git")
+				git(t, fixture.sidecarDir, "remote", "set-url", "origin", missingRemote)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newStatusFixture(t)
+			if tt.setup != nil {
+				tt.setup(t, fixture)
+			}
+			status, err := fixture.service.Status(context.Background(), fixture.root)
+			if err != nil {
+				t.Fatalf("status: %v", err)
+			}
+			if status.Remote != tt.want {
+				t.Fatalf("remote state mismatch: got %q want %q", status.Remote, tt.want)
+			}
+		})
+	}
+}
+
 func TestServiceHookSyncQueuesFailureWithoutReturningError(t *testing.T) {
 	root := newMainRepo(t)
 	cfg := config.Config{Sidecar: filepath.Join(t.TempDir(), "missing.git"), Patterns: []string{"**/SPEC.md"}}
@@ -464,6 +544,51 @@ func TestServiceLogRejectsPathOutsideProjectRoot(t *testing.T) {
 	if !strings.Contains(err.Error(), "outside the project root") {
 		t.Fatalf("expected outside-root error, got %v", err)
 	}
+}
+
+type statusFixture struct {
+	root       string
+	remote     string
+	sidecarDir string
+	service    *sidecar.Service
+}
+
+func newStatusFixture(t *testing.T) statusFixture {
+	t.Helper()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := config.Config{Sidecar: remote, Patterns: []string{"**/SPEC.md"}}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	writeFile(t, root, "README.md", "project\n")
+	git(t, root, "add", "README.md", config.Filename)
+	git(t, root, "commit", "-m", "bootstrap")
+
+	sidecarDir := filepath.Join(root, sidecar.DirName)
+	git(t, "", "init", "-b", "main", sidecarDir)
+	git(t, sidecarDir, "remote", "add", "origin", remote)
+	commitSidecarFile(t, sidecarDir, "src/auth/SPEC.md", "# Auth\n", "initial sidecar sync")
+	return statusFixture{
+		root:       root,
+		remote:     remote,
+		sidecarDir: sidecarDir,
+		service:    sidecar.New(&gitexec.ExecRunner{}),
+	}
+}
+
+func commitSidecarFile(t *testing.T, root, rel, content, message string) string {
+	t.Helper()
+	writeFile(t, root, rel, content)
+	git(t, root, "add", rel)
+	git(t, root, "commit", "-m", message)
+	return gitOutput(t, root, "rev-parse", "HEAD")
+}
+
+func commitFromCurrentTree(t *testing.T, root, parent, message string) string {
+	t.Helper()
+	tree := gitOutput(t, root, "write-tree")
+	return gitOutput(t, root, "commit-tree", tree, "-p", parent, "-m", message)
 }
 
 func newMainRepo(t *testing.T) string {
