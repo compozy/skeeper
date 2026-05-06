@@ -21,7 +21,7 @@ const (
 	golangciLintVersion   = "v2.11.4"
 	goplsModernizeVersion = "v0.21.1"
 	gotestsumVersion      = "v1.13.0"
-	goreleaserVersion     = "v2.6.1"
+	goreleaserVersion     = "v2.15.4"
 	binDir                = "bin"
 	appBinary             = "skeeper"
 	versionPackage        = "github.com/compozy/skeeper/internal/version"
@@ -143,12 +143,21 @@ func HooksInstall() error {
 	return sh.RunV("bunx", "husky")
 }
 
-// ReleaseSnapshot produces a local goreleaser snapshot under dist/.
+// ReleaseSnapshot produces a local GoReleaser Pro snapshot under dist/.
 func ReleaseSnapshot() error {
-	return sh.RunV(
-		"go", "run", "github.com/goreleaser/goreleaser/v2@"+goreleaserVersion,
-		"release", "--snapshot", "--clean",
+	args := []string{"release", "--snapshot", "--clean", "--skip=publish"}
+	if _, err := exec.LookPath("goreleaser"); err == nil {
+		return sh.RunV("goreleaser", args...)
+	}
+	if os.Getenv("GORELEASER_KEY") == "" {
+		return fmt.Errorf("goreleaser not found in PATH; install GoReleaser Pro or set GORELEASER_KEY to use the official installer")
+	}
+	command := fmt.Sprintf(
+		"curl -sfL https://goreleaser.com/static/run | DISTRIBUTION=pro VERSION=%s bash -s -- %s",
+		goreleaserVersion,
+		strings.Join(args, " "),
 	)
+	return sh.RunV("bash", "-c", command)
 }
 
 // BunLint runs the JS/TS toolchain (oxfmt + oxlint) on non-Go files.

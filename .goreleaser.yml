@@ -1,19 +1,28 @@
-# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# yaml-language-server: $schema=https://goreleaser.com/static/schema-pro.json
 # vim: set ts=2 sw=2 tw=0 fo=jcroql
 version: 2
+pro: true
 
 project_name: skeeper
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
+  license: "MIT"
+  homepage: "https://github.com/compozy/skeeper"
+  description: "Sidecar Git versioning for spec artifacts"
+  maintainers:
+    - "Compozy Team <support@compozy.com>"
 
 env:
   - GO111MODULE=on
   - CGO_ENABLED=0
 
+git:
+  tag_sort: -version:refname
+
 before:
   hooks:
     - go mod tidy
-
-git:
-  tag_sort: -version:refname
 
 builds:
   - id: skeeper
@@ -42,10 +51,10 @@ builds:
 
 archives:
   - id: skeeper-archive
-    builds_info:
-      group: skeeper
+    ids:
+      - skeeper
     name_template: >-
-      {{ .ProjectName }}_{{ .Os }}_
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
@@ -54,10 +63,25 @@ archives:
       - goos: windows
         formats:
           - zip
+    files:
+      - README.md
+      - LICENSE*
 
 checksum:
   name_template: "checksums.txt"
   algorithm: sha256
+
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
 
 snapshot:
   version_template: "0.0.0-{{ .Timestamp }}"
@@ -66,39 +90,52 @@ source:
   enabled: true
 
 changelog:
+  # Use git history so the first release works before a previous tag exists on GitHub.
   use: git
   sort: asc
   abbrev: 7
   groups:
-    - title: "Features"
+    - title: "🎉 Features"
       regexp: "^.*feat[\\(\\w)]*:+.*$"
       order: 0
-    - title: "Bug Fixes"
+    - title: "🐛 Bug Fixes"
       regexp: "^.*fix[\\(\\w)]*:+.*$"
       order: 1
-    - title: "Performance"
+    - title: "⚡ Performance Improvements"
       regexp: "^.*perf[\\(\\w)]*:+.*$"
       order: 2
-    - title: "Security"
+    - title: "🔒 Security"
       regexp: "^.*security[\\(\\w)]*:+.*$"
       order: 3
-    - title: "Documentation"
+    - title: "📚 Documentation"
       regexp: "^.*docs[\\(\\w)]*:+.*$"
       order: 4
-    - title: "Refactoring"
+    - title: "♻️ Refactoring"
       regexp: "^.*refactor[\\(\\w)]*:+.*$"
       order: 5
-    - title: "Testing"
-      regexp: "^.*test[\\(\\w)]*:+.*$"
+    - title: "📦 Dependencies"
+      regexp: "^.*deps[\\(\\w)]*:+.*$"
       order: 6
+    - title: "🧪 Testing"
+      regexp: "^.*test[\\(\\w)]*:+.*$"
+      order: 7
     - title: "Other Changes"
       order: 999
   filters:
     exclude:
       - "^(build|ci): "
-      - "^chore: "
+      - "^ci\\(release\\): "
+      - "^release: "
+      - "^chore\\(release\\): "
+      - "^chore: auto-update generated files$"
+      - "^chore: docs$"
+      - "^chore: schema update$"
+      - "^chore: typo$"
+      - "^chore\\(legal\\): "
       - "^chore\\(deps\\): "
       - "^docs: update$"
+      - "^test:"
+      - "^test\\("
       - "merge conflict"
       - Merge branch
       - Merge pull request
@@ -113,55 +150,41 @@ release:
     name: skeeper
   name_template: "Release {{ .Version }}"
   mode: replace
-  replace_existing_artifacts: true
   draft: false
   prerelease: auto
 
-# Optional distribution channels (commented as placeholders).
-# Uncomment and configure when you are ready to ship via these channels.
-#
-# nfpms:
-#   - id: app-linux-packages
-#     package_name: app
-#     file_name_template: "{{ .ConventionalFileName }}"
-#     ids:
-#       - app
-#     vendor: Your Org
-#     homepage: https://example.com
-#     maintainer: Your Team <team@example.com>
-#     description: Brief description of the binary
-#     license: MIT
-#     bindir: /usr/bin
-#     section: utils
-#     priority: optional
-#     formats:
-#       - deb
-#       - rpm
-#
-# brews:
-#   - name: app
-#     ids:
-#       - app-archive
-#     repository:
-#       owner: your-org
-#       name: homebrew-tap
-#       branch: main
-#       token: "{{ .Env.RELEASE_TOKEN }}"
-#     homepage: https://example.com
-#     description: Brief description of the binary
-#
-# signs:
-#   - cmd: cosign
-#     certificate: "${artifact}.pem"
-#     args:
-#       - sign-blob
-#       - "--output-certificate=${certificate}"
-#       - "--output-signature=${signature}"
-#       - "${artifact}"
-#       - "--yes"
-#     artifacts: checksum
-#     output: true
-#
-# sboms:
-#   - artifacts: archive
-#   - artifacts: source
+sboms:
+  - artifacts: archive
+  - id: source
+    artifacts: source
+
+# Homebrew cask configuration
+homebrew_casks:
+  - name: skeeper
+    repository:
+      owner: compozy
+      name: homebrew-compozy
+      branch: main
+      token: "{{ .Env.RELEASE_TOKEN }}"
+
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+
+    commit_msg_template: "Brew cask update for {{ .ProjectName }} version {{ .Tag }}"
+    directory: Casks
+    caveats: |
+      To get started with skeeper, see https://github.com/compozy/skeeper
+    homepage: "https://github.com/compozy/skeeper"
+    description: "Sidecar Git versioning for spec artifacts"
+    skip_upload: auto
+
+# NPM package configuration
+npms:
+  - name: "@compozy/skeeper"
+    description: "Sidecar Git versioning for spec artifacts"
+    repository: "git+https://github.com/compozy/skeeper.git"
+    bugs: https://github.com/compozy/skeeper/issues
+    access: public
+    license: MIT
+    homepage: "https://github.com/compozy/skeeper"

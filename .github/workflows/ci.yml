@@ -66,16 +66,16 @@ jobs:
               [[ -z "$file" ]] && continue
 
               case "$file" in
-                *.go|go.mod|go.sum|Makefile|magefile.go|.golangci.yml|.goreleaser.yml|cliff.toml)
+                cmd/*|internal/*)
                   backend=true
                   ;;
-                cmd/*|internal/*)
+                *.go|go.mod|go.sum|Makefile|.golangci.yml|.goreleaser.yml|.goreleaser.release-*.md.tmpl|cliff.toml)
                   backend=true
                   ;;
                 .github/*|.go-version|mise.toml|.editorconfig)
                   tooling=true
                   ;;
-                .bun-version|.oxfmtrc.json|.oxlintrc.json|.commitlintrc.yaml|package.json|bun.lock|.husky/*)
+                .bun-version|.oxfmtrc.json|.oxlintrc.json|.commitlintrc.yaml|package.json|bun.lock|.husky/*|RELEASE_BODY.md|RELEASE_NOTES.md|.release-notes/*|LICENSE)
                   tooling=true
                   ;;
               esac
