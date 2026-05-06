@@ -1,13 +1,14 @@
 # skeeper
 
-A Go CLI bootstrapped on top of `go-devstack` with agent-ready tooling, ported skills from the `compozy/agh` stack, and Cobra-based command wiring.
+`skeeper` versions Spec-Driven Development artifacts in a sidecar Git repository so specs stay reproducible without polluting the main project PR.
 
 - Pinned **Go 1.26.2** via `mise.toml` + `.go-version`
 - Zero-tolerance **golangci-lint v2** with 21 linters + gofmt/goimports/golines
 - `gopls` modernize analyzer integrated into `make lint`
 - Race-enabled tests via `gotestsum`, coverage via `make cover`
-- **Cobra** CLI scaffold (`cmd/skeeper` → `internal/cli`)
-- TOML config + `.env` secrets, structured `slog` logging, graceful shutdown
+- **Cobra** CLI (`cmd/skeeper` → `internal/cli`)
+- `.skeeper.yml` project config, `.skeeper/` sidecar clone, `.git/skeeper/` local sync state
+- Shell-backed `git` and `gh` integration for debuggable repository operations
 - **Husky + lint-staged + commitlint + oxfmt + oxlint** for non-Go files and commit hygiene
 - **GoReleaser** multi-arch release pipeline
 - **GitHub Actions** CI (detect-changes + verify) and Release (tag-driven)
@@ -18,7 +19,7 @@ A Go CLI bootstrapped on top of `go-devstack` with agent-ready tooling, ported s
 ## Prerequisites
 
 - [mise](https://mise.jdx.dev/) (recommended) or Go 1.26.2 + Bun 1.3.4
-- `git`, `make`
+- `git`, `gh`, `make`
 
 ## Quick Start
 
@@ -66,17 +67,45 @@ make docker-build     # docker build -t skeeper:dev .
 ```bash
 go run ./cmd/skeeper --help
 go run ./cmd/skeeper version
-go run ./cmd/skeeper run --config ./config.toml
+go run ./cmd/skeeper init
+go run ./cmd/skeeper hydrate
+go run ./cmd/skeeper sync
+go run ./cmd/skeeper status
+go run ./cmd/skeeper log src/auth/SPEC.md
 ```
+
+## Sidecar Workflow
+
+Run `skeeper init` once in a project. It creates a private GitHub sidecar repository with `gh repo create`, clones it into `.skeeper/`, writes `.skeeper.yml`, adds `.skeeper/` and the configured spec patterns to `.gitignore`, and installs a managed post-commit hook.
+
+The committed config file looks like this:
+
+```yaml
+sidecar: git@github.com:user/myproject-specs.git
+bootstrap: brew install user/tap/skeeper
+patterns:
+  - "**/SPEC.md"
+  - "docs/specs/**"
+  - ".claude/plans/**"
+  - "**/*.spec.md"
+```
+
+Developers edit specs at their natural paths beside code. On `git commit`, the hook runs `skeeper sync --hook` with a short foreground budget. The hook always exits successfully; network or auth failures are queued under `.git/skeeper/` and can be retried with `skeeper sync`.
+
+Fresh clones run `skeeper hydrate` to clone `.skeeper/`, restore matched specs into the main working tree, and install the hook.
 
 ## Project Layout
 
 ```
 cmd/skeeper/       CLI entrypoint (thin shim into internal/cli)
-internal/cli/      Cobra root + subcommands (run, version, ...)
-internal/config/   TOML config + .env secrets
+internal/cli/      Cobra root + sidecar subcommands
+internal/config/   .skeeper.yml config loading and validation
+internal/gitexec/  Context-aware git and gh process runner
+internal/hooks/    Managed post-commit hook installation
+internal/matcher/  Doublestar spec-file discovery
+internal/sidecar/  Clone, hydrate, sync, status, and log orchestration
+internal/state/    Local queue and sync log under .git/skeeper/
 internal/version/  Build metadata injection (Version, Commit, BuildDate)
-internal/logger/   Structured slog logging
 .agents/skills/    Curated agent skills (real folders)
 .claude/skills/    Symlinks into .agents/skills/ (Claude Code compatibility)
 .claude/agents/    Decision-archetype agents (architect, devil's advocate, ...)

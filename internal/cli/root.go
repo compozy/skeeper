@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 
+	"github.com/compozy/skeeper/internal/gitexec"
+	"github.com/compozy/skeeper/internal/sidecar"
 	"github.com/spf13/cobra"
 )
 
@@ -25,15 +27,20 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
+func newRootCmd(stdout, _ io.Writer) *cobra.Command {
+	service := sidecar.New(&gitexec.ExecRunner{})
 	cmd := &cobra.Command{
 		Use:           "skeeper",
-		Short:         "skeeper command-line interface",
-		Long:          "skeeper is a Go CLI built on cobra.",
+		Short:         "Version spec artifacts in a sidecar Git repository",
+		Long:          "skeeper mirrors Spec-Driven Development artifacts into a sidecar Git repository.",
 		SilenceUsage:  true,
 		SilenceErrors: false,
 	}
-	cmd.AddCommand(newRunCmd(stdout, stderr))
+	cmd.AddCommand(newInitCmd(stdout, service))
+	cmd.AddCommand(newHydrateCmd(stdout, service))
+	cmd.AddCommand(newSyncCmd(stdout, service))
+	cmd.AddCommand(newStatusCmd(stdout, service))
+	cmd.AddCommand(newLogCmd(stdout, service))
 	cmd.AddCommand(newVersionCmd(stdout))
 	return cmd
 }

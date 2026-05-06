@@ -3,178 +3,121 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestDefaultConfigHasValidDefaults(t *testing.T) {
+func TestLoadStrictConfig(t *testing.T) {
 	t.Parallel()
 
-	cfg := Default()
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("default config should be valid: %v", err)
-	}
-	if cfg.App.Name != "app" {
-		t.Errorf("expected default app.name 'app', got %q", cfg.App.Name)
-	}
-	if cfg.App.Env != "development" {
-		t.Errorf("expected default app.env 'development', got %q", cfg.App.Env)
-	}
-	if cfg.Server.Host != "0.0.0.0" {
-		t.Errorf("expected default server.host '0.0.0.0', got %q", cfg.Server.Host)
-	}
-	if cfg.Server.Port != 8080 {
-		t.Errorf("expected default server.port 8080, got %d", cfg.Server.Port)
-	}
-	if cfg.Log.Level != "info" {
-		t.Errorf("expected default log.level 'info', got %q", cfg.Log.Level)
-	}
-}
-
-func TestLoadConfigRoundTrip(t *testing.T) {
-	t.Parallel()
-
+	dir := t.TempDir()
 	content := `
-[app]
-name = "my-service"
-env = "production"
-
-[server]
-host = "127.0.0.1"
-port = 3000
-
-[log]
-level = "debug"
+sidecar: git@github.com:user/project-specs.git
+bootstrap: curl -fsSL https://example.com/install.sh | sh
+patterns:
+  - "**/SPEC.md"
+  - "docs/specs/**"
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, Filename), []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
-	cfg, err := Load(path)
+	cfg, err := Load(dir)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if cfg.App.Name != "my-service" {
-		t.Errorf("expected app.name 'my-service', got %q", cfg.App.Name)
+	if cfg.Sidecar != "git@github.com:user/project-specs.git" {
+		t.Fatalf("unexpected sidecar %q", cfg.Sidecar)
 	}
-	if cfg.App.Env != "production" {
-		t.Errorf("expected app.env 'production', got %q", cfg.App.Env)
+	if cfg.Bootstrap == "" {
+		t.Fatal("expected bootstrap to be loaded")
 	}
-	if cfg.Server.Host != "127.0.0.1" {
-		t.Errorf("expected server.host '127.0.0.1', got %q", cfg.Server.Host)
-	}
-	if cfg.Server.Port != 3000 {
-		t.Errorf("expected server.port 3000, got %d", cfg.Server.Port)
-	}
-	if cfg.Log.Level != "debug" {
-		t.Errorf("expected log.level 'debug', got %q", cfg.Log.Level)
-	}
-}
-
-func TestLoadEmptyPathUsesDefaults(t *testing.T) {
-	t.Parallel()
-
-	cfg, err := Load("")
-	if err != nil {
-		t.Fatalf("load with empty path: %v", err)
-	}
-	if cfg.App.Name != "app" {
-		t.Errorf("expected default app.name 'app', got %q", cfg.App.Name)
+	if len(cfg.Patterns) != 2 {
+		t.Fatalf("expected 2 patterns, got %d", len(cfg.Patterns))
 	}
 }
 
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	t.Parallel()
 
+	dir := t.TempDir()
 	content := `
-[app]
-name = "test"
-env = "development"
-unknown_field = true
+sidecar: git@github.com:user/project-specs.git
+patterns:
+  - "**/SPEC.md"
+extra: true
 `
-	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, Filename), []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for unknown keys, got nil")
+	if _, err := Load(dir); err == nil {
+		t.Fatal("expected unknown key error, got nil")
 	}
 }
 
-func TestValidateRejectsInvalidValues(t *testing.T) {
+func TestValidateRejectsInvalidConfig(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name   string
-		mutate func(*Config)
+		name string
+		cfg  Config
 	}{
 		{
-			name:   "empty app name",
-			mutate: func(c *Config) { c.App.Name = "" },
+			name: "missing sidecar",
+			cfg:  Config{Patterns: []string{"**/SPEC.md"}},
 		},
 		{
-			name:   "whitespace app name",
-			mutate: func(c *Config) { c.App.Name = "   " },
+			name: "missing patterns",
+			cfg:  Config{Sidecar: "git@github.com:user/project-specs.git"},
 		},
 		{
-			name:   "invalid app env",
-			mutate: func(c *Config) { c.App.Env = "local" },
+			name: "empty pattern",
+			cfg:  Config{Sidecar: "git@github.com:user/project-specs.git", Patterns: []string{" "}},
 		},
 		{
-			name:   "port zero",
-			mutate: func(c *Config) { c.Server.Port = 0 },
-		},
-		{
-			name:   "port negative",
-			mutate: func(c *Config) { c.Server.Port = -1 },
-		},
-		{
-			name:   "port too high",
-			mutate: func(c *Config) { c.Server.Port = 70000 },
-		},
-		{
-			name:   "invalid log level",
-			mutate: func(c *Config) { c.Log.Level = "trace" },
+			name: "duplicate pattern",
+			cfg: Config{
+				Sidecar:  "git@github.com:user/project-specs.git",
+				Patterns: []string{"**/SPEC.md", "**/SPEC.md"},
+			},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			cfg := Default()
-			tc.mutate(&cfg)
-			if err := cfg.Validate(); err == nil {
+			if err := tc.cfg.Validate(); err == nil {
 				t.Fatal("expected validation error, got nil")
 			}
 		})
 	}
 }
 
-func TestLoadDotEnvIfPresentLoadsValues(t *testing.T) {
+func TestSaveRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	envPath := filepath.Join(dir, ".env")
-	if err := os.WriteFile(envPath, []byte("TEST_DOTENV_VAR=hello\n"), 0o644); err != nil {
-		t.Fatalf("write .env: %v", err)
+	cfg := Config{
+		Sidecar:   "git@github.com:user/project-specs.git",
+		Bootstrap: "brew install user/tap/skeeper",
+		Patterns:  []string{"**/SPEC.md"},
 	}
-
-	if err := LoadDotEnvIfPresent(envPath); err != nil {
-		t.Fatalf("load dotenv: %v", err)
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
 	}
-	if got := os.Getenv("TEST_DOTENV_VAR"); got != "hello" {
-		t.Errorf("expected 'hello', got %q", got)
+	data, err := os.ReadFile(filepath.Join(dir, Filename))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
 	}
-}
-
-func TestLoadDotEnvIfPresentMissingFileIsOK(t *testing.T) {
-	t.Parallel()
-
-	path := filepath.Join(t.TempDir(), ".env")
-	if err := LoadDotEnvIfPresent(path); err != nil {
-		t.Fatalf("missing .env should not error: %v", err)
+	if !strings.Contains(string(data), "bootstrap: brew install") {
+		t.Fatalf("expected bootstrap in saved config, got:\n%s", string(data))
+	}
+	got, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load saved config: %v", err)
+	}
+	if got.Sidecar != cfg.Sidecar || got.Bootstrap != cfg.Bootstrap || len(got.Patterns) != 1 {
+		t.Fatalf("round trip mismatch: %#v", got)
 	}
 }

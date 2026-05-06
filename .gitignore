@@ -9,3 +9,7 @@ coverage.out
 coverage.html
 node_modules/
 .husky/_/
+.claude/skills
+.codex/ledger
+.codex/plans
+docs/plans

@@ -1,140 +1,116 @@
+// Package config loads and writes the committed skeeper project config.
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
-	"sort"
+	"path/filepath"
 	"strings"
 
-	"github.com/BurntSushi/toml"
+	"gopkg.in/yaml.v3"
 )
 
-// Config contains the complete TOML-backed runtime configuration plus
-// non-TOML runtime helpers such as secrets.
+const (
+	// Filename is the committed project config file.
+	Filename = ".skeeper.yml"
+)
+
+// Config describes how a project mirrors spec files into its sidecar repo.
 type Config struct {
-	App     AppConfig    `toml:"app"`
-	Server  ServerConfig `toml:"server"`
-	Log     LogConfig    `toml:"log"`
-	Secrets Secrets      `toml:"-"`
+	Sidecar   string   `yaml:"sidecar"`
+	Bootstrap string   `yaml:"bootstrap,omitempty"`
+	Patterns  []string `yaml:"patterns"`
 }
 
-// AppConfig contains the application identity and environment.
-type AppConfig struct {
-	Name string `toml:"name"`
-	Env  string `toml:"env"`
-}
-
-// ServerConfig contains network binding settings.
-type ServerConfig struct {
-	Host string `toml:"host"`
-	Port int    `toml:"port"`
-}
-
-// LogConfig controls structured logging output.
-type LogConfig struct {
-	Level string `toml:"level"`
-}
-
-// Default returns a sane starting configuration.
-func Default() Config {
-	return Config{
-		App: AppConfig{
-			Name: "app",
-			Env:  "development",
-		},
-		Server: ServerConfig{
-			Host: "0.0.0.0",
-			Port: 8080,
-		},
-		Log: LogConfig{
-			Level: "info",
-		},
-		Secrets: LoadSecretsFromEnv(),
+// DefaultPatterns returns the interactive init defaults.
+func DefaultPatterns() []string {
+	return []string{
+		"**/SPEC.md",
+		"docs/specs/**",
+		".claude/plans/**",
+		"**/*.spec.md",
 	}
 }
 
-// Load reads and validates the TOML config file, then overlays runtime secrets
-// from the environment.
-func Load(path string) (Config, error) {
-	cfg := Default()
-	if path == "" {
-		return cfg, cfg.Validate()
+// Load reads and validates .skeeper.yml from root.
+func Load(root string) (Config, error) {
+	path := filepath.Join(root, Filename)
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Config{}, fmt.Errorf("%s not found", Filename)
+		}
+		return Config{}, fmt.Errorf("open %s: %w", Filename, err)
 	}
+	defer file.Close()
 
-	if err := decodeFile(path, &cfg); err != nil {
+	var cfg Config
+	dec := yaml.NewDecoder(file)
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		return Config{}, fmt.Errorf("decode %s: %w", Filename, err)
+	}
+	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
-	cfg.Secrets = LoadSecretsFromEnv()
-	return cfg, cfg.Validate()
+	return cfg, nil
 }
 
-func decodeFile(path string, cfg *Config) error {
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("stat config %q: %w", path, err)
+// Save writes cfg to .skeeper.yml under root.
+func Save(root string, cfg Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
 	}
 
-	meta, err := toml.DecodeFile(path, cfg)
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(cfg); err != nil {
+		return fmt.Errorf("encode %s: %w", Filename, err)
+	}
+	if err := enc.Close(); err != nil {
+		return fmt.Errorf("close yaml encoder: %w", err)
+	}
+
+	path := filepath.Join(root, Filename)
+	if err := writeFile(path, buf.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", Filename, err)
+	}
+	return nil
+}
+
+func writeFile(path string, data []byte, perm os.FileMode) error {
+	file, err := os.OpenFile(filepath.Clean(path), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
-		return fmt.Errorf("decode config %q: %w", path, err)
+		return err
 	}
-
-	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
-		keys := make([]string, 0, len(undecoded))
-		for _, key := range undecoded {
-			keys = append(keys, key.String())
-		}
-		sort.Strings(keys)
-		return fmt.Errorf("unknown config keys: %s", strings.Join(keys, ", "))
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
 	}
-
-	return nil
+	return file.Close()
 }
 
-// Validate ensures the config is internally consistent before runtime startup.
+// Validate checks that the config can drive deterministic v1 behavior.
 func (c Config) Validate() error {
-	if err := c.App.Validate(); err != nil {
-		return err
+	if strings.TrimSpace(c.Sidecar) == "" {
+		return errors.New("sidecar is required")
 	}
-	if err := c.Server.Validate(); err != nil {
-		return err
+	if len(c.Patterns) == 0 {
+		return errors.New("patterns must contain at least one glob")
 	}
-	if err := c.Log.Validate(); err != nil {
-		return err
-	}
-	if err := c.Secrets.Validate(); err != nil {
-		return err
-	}
-	return nil
-}
-
-// Validate ensures application identity settings are usable.
-func (c AppConfig) Validate() error {
-	if strings.TrimSpace(c.Name) == "" {
-		return errors.New("app.name is required")
-	}
-	switch strings.ToLower(strings.TrimSpace(c.Env)) {
-	case "development", "staging", "production":
-	default:
-		return fmt.Errorf("app.env must be development, staging, or production: %q", c.Env)
-	}
-	return nil
-}
-
-// Validate ensures server binding settings are within supported bounds.
-func (c ServerConfig) Validate() error {
-	if c.Port <= 0 || c.Port > 65535 {
-		return fmt.Errorf("server.port must be between 1 and 65535: %d", c.Port)
-	}
-	return nil
-}
-
-// Validate ensures the log level is supported.
-func (c LogConfig) Validate() error {
-	switch strings.ToLower(strings.TrimSpace(c.Level)) {
-	case "debug", "info", "warn", "error":
-	default:
-		return fmt.Errorf("log.level must be debug, info, warn, or error: %q", c.Level)
+	seen := make(map[string]struct{}, len(c.Patterns))
+	for i, pattern := range c.Patterns {
+		trimmed := strings.TrimSpace(pattern)
+		if trimmed == "" {
+			return fmt.Errorf("patterns[%d] is empty", i)
+		}
+		if _, ok := seen[trimmed]; ok {
+			return fmt.Errorf("patterns[%d] duplicates %q", i, trimmed)
+		}
+		seen[trimmed] = struct{}{}
 	}
 	return nil
 }

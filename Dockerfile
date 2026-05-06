@@ -45,4 +45,4 @@ COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 USER nonroot:nonroot
 
 ENTRYPOINT ["/usr/local/bin/skeeper"]
-CMD ["run"]
+CMD ["--help"]

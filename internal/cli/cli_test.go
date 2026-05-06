@@ -31,3 +31,22 @@ func TestExecute_UnknownCommand(t *testing.T) {
 		}
 	})
 }
+
+func TestExecute_HelpListsSidecarCommands(t *testing.T) {
+	t.Run("Should expose v1 sidecar command surface", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := cli.Execute(context.Background(), []string{"--help"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d (stderr=%q)", code, stderr.String())
+		}
+		help := stdout.String()
+		for _, command := range []string{"init", "hydrate", "sync", "status", "log", "version"} {
+			if !strings.Contains(help, command) {
+				t.Fatalf("expected help to include %q, got:\n%s", command, help)
+			}
+		}
+		if strings.Contains(help, "run") {
+			t.Fatalf("did not expect scaffold run command in help:\n%s", help)
+		}
+	})
+}
