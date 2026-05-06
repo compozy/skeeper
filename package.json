@@ -1,12 +1,4 @@
 {
-  "name": "skeeper",
-  "private": true,
-  "scripts": {
-    "prepare": "husky",
-    "lint": "bun run format && bunx oxlint --no-error-on-unmatched-pattern '**/*.{ts,tsx,js,jsx,mjs,cjs}'",
-    "format": "bunx oxfmt",
-    "format:check": "bunx oxfmt --check"
-  },
   "devDependencies": {
     "@commitlint/cli": "^20.5.0",
     "@commitlint/config-conventional": "^20.5.0",
@@ -17,13 +9,22 @@
   },
   "lint-staged": {
     "*.go": "make fmt",
+    "*.{css,html,json,jsonc,yaml,yml,md}": [
+      "oxfmt --no-error-on-unmatched-pattern"
+    ],
     "*.{js,jsx,ts,tsx}": [
       "oxfmt --no-error-on-unmatched-pattern",
       "oxlint"
-    ],
-    "*.{css,html,json,jsonc,yaml,yml,md}": [
-      "oxfmt --no-error-on-unmatched-pattern"
     ]
   },
-  "packageManager": "bun@1.3.4"
+  "name": "skeeper",
+  "packageManager": "bun@1.3.4",
+  "private": true,
+  "scripts": {
+    "format": "bunx oxfmt",
+    "format:check": "bunx oxfmt --check",
+    "lint": "bun run format \u0026\u0026 bunx oxlint --no-error-on-unmatched-pattern '**/*.{ts,tsx,js,jsx,mjs,cjs}'",
+    "prepare": "husky"
+  },
+  "version": "0.1.0"
 }
