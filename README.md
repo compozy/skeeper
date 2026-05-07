@@ -149,7 +149,7 @@ In a Git repo where you want to track specs:
 skeeper init
 ```
 
-Interactive by default — opens a terminal form for the sidecar mode, repository name or URL, `directory`, bootstrap command, and spec patterns. Or pass values as flags:
+Interactive by default — opens a terminal form for the sidecar mode, repository name or URL, `directory`, bootstrap command, and optional extra context globs. The interactive flow always includes the default spec globs (`**/SPEC.md`, `docs/specs/**`, `.claude/plans/**`, and `**/*.spec.md`); the extra context prompt starts empty and is only for additional folders or files you explicitly want in the sidecar. Or pass values as flags:
 
 ```bash
 skeeper init \
@@ -170,6 +170,8 @@ skeeper init \
 ```
 
 `skeeper init` creates the GitHub repo with `gh repo create` unless `--sidecar` points to an existing remote. It clones the sidecar into `.skeeper/`, writes `.skeeper.yml`, updates `.gitignore`, and installs the post-commit hook. New init runs default `directory` to the source repo name; pass `--no-directory` only when you intentionally want legacy root behavior.
+
+When using flags, repeated `--patterns` values are the complete pattern set written to `.skeeper.yml`; they do not append to the interactive defaults.
 
 ### 3. Edit specs and commit normally
 
@@ -229,17 +231,17 @@ This design has two consequences worth knowing:
 skeeper init [flags]
 ```
 
-| Flag             | Default   | Description                                           |
-| ---------------- | --------- | ----------------------------------------------------- |
-| `--sidecar`      |           | Existing sidecar repository URL                       |
-| `--sidecar-name` |           | GitHub sidecar repository name or `OWNER/REPO`        |
-| `--visibility`   | `private` | GitHub visibility: `private`, `public`, or `internal` |
-| `--directory`    | repo slug | Sidecar directory namespace for this source repo      |
-| `--no-directory` | `false`   | Omit namespace and use legacy root behavior           |
-| `--bootstrap`    |           | Optional install command stored in `.skeeper.yml`     |
-| `--patterns`     |           | Spec glob pattern; repeat for multiple patterns       |
+| Flag             | Default   | Description                                                  |
+| ---------------- | --------- | ------------------------------------------------------------ |
+| `--sidecar`      |           | Existing sidecar repository URL                              |
+| `--sidecar-name` |           | GitHub sidecar repository name or `OWNER/REPO`               |
+| `--visibility`   | `private` | GitHub visibility: `private`, `public`, or `internal`        |
+| `--directory`    | repo slug | Sidecar directory namespace for this source repo             |
+| `--no-directory` | `false`   | Omit namespace and use legacy root behavior                  |
+| `--bootstrap`    |           | Optional install command stored in `.skeeper.yml`            |
+| `--patterns`     |           | Complete spec glob pattern set; repeat for multiple patterns |
 
-When run interactively, `init` opens a terminal form. It runs `gh repo create` for `--sidecar-name` or the create mode, but skips GitHub creation when `--sidecar` is provided. `--sidecar` and `--sidecar-name` are mutually exclusive; `--directory` and `--no-directory` are mutually exclusive.
+When run interactively, `init` opens a terminal form. It includes the default spec globs automatically, then asks whether to add extra context globs such as `AGENTS.md`, `CLAUDE.md`, or `.codex/plans/**`. It runs `gh repo create` for `--sidecar-name` or the create mode, but skips GitHub creation when `--sidecar` is provided. `--sidecar` and `--sidecar-name` are mutually exclusive; `--directory` and `--no-directory` are mutually exclusive.
 
 </details>
 

@@ -86,6 +86,13 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 				Patterns: []string{"**/SPEC.md", "**/SPEC.md"},
 			},
 		},
+		{
+			name: "invalid pattern",
+			cfg: Config{
+				Sidecar:  "git@github.com:user/project-specs.git",
+				Patterns: []string{"["},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -95,6 +102,23 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 				t.Fatal("expected validation error, got nil")
 			}
 		})
+	}
+}
+
+func TestNormalizeCanonicalizesPatterns(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		Sidecar:  "git@github.com:user/project-specs.git",
+		Patterns: []string{" ./docs/specs/** ", "src\\**\\SPEC.md"},
+	}
+	normalized, err := cfg.Normalize()
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	want := []string{"docs/specs/**", "src/**/SPEC.md"}
+	if strings.Join(normalized.Patterns, ",") != strings.Join(want, ",") {
+		t.Fatalf("patterns mismatch: got %#v want %#v", normalized.Patterns, want)
 	}
 }
 

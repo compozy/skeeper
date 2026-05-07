@@ -102,7 +102,10 @@ func (s *Service) Init(ctx context.Context, dir string, opts InitOptions) (InitR
 	if visibility == "" {
 		visibility = "private"
 	}
-	patterns := cleanPatterns(opts.Patterns)
+	patterns, err := config.NormalizePatterns(opts.Patterns)
+	if err != nil {
+		return InitResult{}, err
+	}
 	if len(patterns) == 0 {
 		patterns = config.DefaultPatterns()
 	}
@@ -812,17 +815,6 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-func cleanPatterns(patterns []string) []string {
-	cleaned := make([]string, 0, len(patterns))
-	for _, pattern := range patterns {
-		trimmed := strings.TrimSpace(pattern)
-		if trimmed != "" {
-			cleaned = append(cleaned, trimmed)
-		}
-	}
-	return cleaned
-}
-
 func validateExistingConfig(cfg config.Config, opts InitOptions) error {
 	sidecarURL := strings.TrimSpace(opts.Sidecar)
 	if sidecarURL != "" && cfg.Sidecar != sidecarURL {
@@ -848,7 +840,10 @@ func validateExistingConfig(cfg config.Config, opts InitOptions) error {
 	if bootstrap != "" && bootstrap != cfg.Bootstrap {
 		return fmt.Errorf("%s already exists with incompatible bootstrap", config.Filename)
 	}
-	patterns := cleanPatterns(opts.Patterns)
+	patterns, err := config.NormalizePatterns(opts.Patterns)
+	if err != nil {
+		return err
+	}
 	if len(patterns) > 0 && !sameStrings(patterns, cfg.Patterns) {
 		return fmt.Errorf("%s already exists with incompatible patterns", config.Filename)
 	}

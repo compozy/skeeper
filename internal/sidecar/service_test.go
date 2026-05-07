@@ -469,6 +469,25 @@ func TestServiceInitUsesExistingSidecarURLAndDefaultDirectory(t *testing.T) {
 	}
 }
 
+func TestServiceInitRejectsInvalidPatternsBeforeSideEffects(t *testing.T) {
+	root := newMainRepo(t)
+	remote := filepath.Join(t.TempDir(), "shared-specs.git")
+
+	_, err := sidecar.New(&gitexec.ExecRunner{}).Init(context.Background(), root, sidecar.InitOptions{
+		Sidecar:  remote,
+		Patterns: []string{"["},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid glob") {
+		t.Fatalf("expected invalid glob error, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, config.Filename)); !os.IsNotExist(statErr) {
+		t.Fatalf("expected config not to be written, stat err=%v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, sidecar.DirName)); !os.IsNotExist(statErr) {
+		t.Fatalf("expected sidecar clone not to be created, stat err=%v", statErr)
+	}
+}
+
 func TestServiceInitRejectsIncompatibleExistingConfig(t *testing.T) {
 	root := newMainRepo(t)
 	cfg := config.Config{Sidecar: filepath.Join(t.TempDir(), "sidecar.git"), Patterns: []string{"**/SPEC.md"}}

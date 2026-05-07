@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
 )
 
@@ -115,26 +116,44 @@ func (c Config) Normalize() (Config, error) {
 	if strings.TrimSpace(c.Sidecar) == "" {
 		return Config{}, errors.New("sidecar is required")
 	}
-	if len(c.Patterns) == 0 {
-		return Config{}, errors.New("patterns must contain at least one glob")
-	}
 	directory, err := CleanDirectory(c.Directory)
 	if err != nil {
 		return Config{}, err
 	}
-	seen := make(map[string]struct{}, len(c.Patterns))
-	for i, pattern := range c.Patterns {
-		trimmed := strings.TrimSpace(pattern)
-		if trimmed == "" {
-			return Config{}, fmt.Errorf("patterns[%d] is empty", i)
-		}
-		if _, ok := seen[trimmed]; ok {
-			return Config{}, fmt.Errorf("patterns[%d] duplicates %q", i, trimmed)
-		}
-		seen[trimmed] = struct{}{}
+	patterns, err := NormalizePatterns(c.Patterns)
+	if err != nil {
+		return Config{}, err
+	}
+	if len(patterns) == 0 {
+		return Config{}, errors.New("patterns must contain at least one glob")
 	}
 	c.Directory = directory
+	c.Patterns = patterns
 	return c, nil
+}
+
+// NormalizePatterns validates and canonicalizes doublestar path globs while
+// preserving their order.
+func NormalizePatterns(patterns []string) ([]string, error) {
+	normalized := make([]string, 0, len(patterns))
+	seen := make(map[string]struct{}, len(patterns))
+	for i, pattern := range patterns {
+		cleaned := strings.TrimSpace(filepath.ToSlash(pattern))
+		cleaned = strings.ReplaceAll(cleaned, "\\", "/")
+		cleaned = strings.TrimPrefix(cleaned, "./")
+		if cleaned == "" {
+			return nil, fmt.Errorf("patterns[%d] is empty", i)
+		}
+		if !doublestar.ValidatePathPattern(cleaned) {
+			return nil, fmt.Errorf("patterns[%d] is invalid glob %q", i, pattern)
+		}
+		if _, ok := seen[cleaned]; ok {
+			return nil, fmt.Errorf("patterns[%d] duplicates %q", i, cleaned)
+		}
+		seen[cleaned] = struct{}{}
+		normalized = append(normalized, cleaned)
+	}
+	return normalized, nil
 }
 
 // CleanDirectory validates a sidecar directory namespace and returns its

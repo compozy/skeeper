@@ -7,14 +7,14 @@ import (
 	"github.com/compozy/skeeper/internal/sidecar"
 )
 
-func TestFormStateOptionsSubmitDefaultDirectory(t *testing.T) {
+func TestFormStateOptionsSubmitDefaultDirectoryWithDefaultPatterns(t *testing.T) {
 	t.Parallel()
 
 	state := newFormState(sidecar.InitDefaults{
 		SidecarName: "project-specs",
 		Visibility:  "private",
 		Directory:   "project",
-		Patterns:    []string{"**/SPEC.md"},
+		Patterns:    []string{"**/SPEC.md", "docs/specs/**"},
 	})
 	opts, err := state.options()
 	if err != nil {
@@ -29,8 +29,108 @@ func TestFormStateOptionsSubmitDefaultDirectory(t *testing.T) {
 	if opts.Directory != "project" || !opts.DirectorySet || opts.NoDirectory {
 		t.Fatalf("unexpected directory options: %#v", opts)
 	}
-	if len(opts.Patterns) != 1 || opts.Patterns[0] != "**/SPEC.md" {
+	if strings.Join(opts.Patterns, ",") != "**/SPEC.md,docs/specs/**" {
 		t.Fatalf("unexpected patterns: %#v", opts.Patterns)
+	}
+}
+
+func TestFormStateOptionsAppendsExtraContextPatterns(t *testing.T) {
+	t.Parallel()
+
+	state := newFormState(sidecar.InitDefaults{
+		SidecarName: "project-specs",
+		Visibility:  "private",
+		Directory:   "project",
+		Patterns:    []string{"**/SPEC.md", "docs/specs/**"},
+	})
+	state.syncExtraContext = true
+	state.extraPatterns = "AGENTS.md\nCLAUDE.md\n.codex/plans/**"
+
+	opts, err := state.options()
+	if err != nil {
+		t.Fatalf("options: %v", err)
+	}
+	want := "**/SPEC.md,docs/specs/**,AGENTS.md,CLAUDE.md,.codex/plans/**"
+	if strings.Join(opts.Patterns, ",") != want {
+		t.Fatalf("unexpected patterns: %#v", opts.Patterns)
+	}
+}
+
+func TestFormStateOptionsSplitsCommaSeparatedExtraContextPatterns(t *testing.T) {
+	t.Parallel()
+
+	state := newFormState(sidecar.InitDefaults{
+		SidecarName: "project-specs",
+		Visibility:  "private",
+		Directory:   "project",
+		Patterns:    []string{"**/SPEC.md"},
+	})
+	state.syncExtraContext = true
+	state.extraPatterns = "AGENTS.md, CLAUDE.md"
+
+	opts, err := state.options()
+	if err != nil {
+		t.Fatalf("options: %v", err)
+	}
+	want := "**/SPEC.md,AGENTS.md,CLAUDE.md"
+	if strings.Join(opts.Patterns, ",") != want {
+		t.Fatalf("unexpected patterns: %#v", opts.Patterns)
+	}
+}
+
+func TestFormStateOptionsDeduplicatesExtraContextPatterns(t *testing.T) {
+	t.Parallel()
+
+	state := newFormState(sidecar.InitDefaults{
+		SidecarName: "project-specs",
+		Visibility:  "private",
+		Directory:   "project",
+		Patterns:    []string{"**/SPEC.md"},
+	})
+	state.syncExtraContext = true
+	state.extraPatterns = "**/SPEC.md\n./AGENTS.md\nAGENTS.md"
+
+	opts, err := state.options()
+	if err != nil {
+		t.Fatalf("options: %v", err)
+	}
+	want := "**/SPEC.md,AGENTS.md"
+	if strings.Join(opts.Patterns, ",") != want {
+		t.Fatalf("unexpected patterns: %#v", opts.Patterns)
+	}
+}
+
+func TestFormStateOptionsRequiresConfirmedExtraContextPatterns(t *testing.T) {
+	t.Parallel()
+
+	state := newFormState(sidecar.InitDefaults{
+		SidecarName: "project-specs",
+		Visibility:  "private",
+		Directory:   "project",
+		Patterns:    []string{"**/SPEC.md"},
+	})
+	state.syncExtraContext = true
+	state.extraPatterns = " , \n "
+
+	if _, err := state.options(); err == nil || !strings.Contains(err.Error(), "extra context globs") {
+		t.Fatalf("expected extra context glob error, got %v", err)
+	}
+}
+
+func TestFormStateOptionsRejectsInvalidExtraContextPattern(t *testing.T) {
+	t.Parallel()
+
+	state := newFormState(sidecar.InitDefaults{
+		SidecarName: "project-specs",
+		Visibility:  "private",
+		Directory:   "project",
+		Patterns:    []string{"**/SPEC.md"},
+	})
+	state.syncExtraContext = true
+	state.extraPatterns = "["
+
+	if _, err := state.options(); err == nil || !strings.Contains(err.Error(), "invalid glob") {
+		t.Fatalf("expected invalid glob error, got %v", err)
 	}
 }
 
@@ -103,9 +203,7 @@ func TestFormStateOptionsRequiresPatterns(t *testing.T) {
 		SidecarName: "project-specs",
 		Visibility:  "private",
 		Directory:   "project",
-		Patterns:    []string{"**/SPEC.md"},
 	})
-	state.patterns = " , "
 
 	if _, err := state.options(); err == nil || !strings.Contains(err.Error(), "patterns") {
 		t.Fatalf("expected patterns error, got %v", err)
