@@ -18,7 +18,9 @@
   </p>
 </div>
 
-`skeeper` keeps spec artifacts next to the code they describe without putting those files in the main repository history. It mirrors configured files into a sidecar Git repository, writes a tracked `skeeper.lock` that points each main commit at exact sidecar commits, and blocks commits or pushes when the sidecar state cannot be proven.
+Spec docs drift from code, or they bloat every PR. Skeeper picks neither.
+
+It mirrors `SPEC.md`, ADRs, RFCs, and AI plan files into a sidecar Git repository and commits a tiny `skeeper.lock` to your main repo that pins every commit to exact sidecar commits. PR diffs stay focused on code, spec history stays auditable, and nothing silently drifts because the managed Git hooks fail the commit if the sidecar state cannot be proven.
 
 ## Highlights
 
@@ -29,6 +31,13 @@
 - **Branch-aware history.** Namespace branches use `<namespace>/__branches__/<source-branch>`.
 - **Fresh-clone hydration.** `skeeper hydrate` restores files from the locked sidecar commits, not a best-effort latest branch.
 - **Agent-friendly commands.** `status`, `sync`, `verify`, `fsck`, `hooks check`, `repair status`, `pattern`, `adopt`, and `untrack` all support deterministic output where needed.
+- **Skill for AI agents.** A bundled skill at [`.agents/skills/skeeper/SKILL.md`](.agents/skills/skeeper/SKILL.md) teaches coding agents the strict-sync workflow, namespaces, and recovery commands.
+
+## Who Is This For
+
+- Teams using AI coding agents that produce `SPEC.md`, PRD, TechSpec, and plan markdown next to code.
+- Engineering organizations running ADRs, RFCs, and design docs in-repo without making every PR a docs+code review.
+- Solo developers who want full spec history (`git log`, `git blame`, branches, PRs) without polluting their main repository's diff.
 
 ## Installation
 
@@ -269,6 +278,13 @@ The main commit and sidecar remote disagree. Run `skeeper sync`, include the upd
 **A namespace overlaps another namespace**
 
 Move shared files into exactly one namespace by adding `exclude:` entries. Skeeper does not use order-based precedence.
+
+## When Skeeper Is the Wrong Tool
+
+- Repositories where specs already belong in the main diff and reviewers explicitly want them inline.
+- Teams that need PR review on the spec content itself before merge — Skeeper mirrors after the main commit succeeds, by design.
+- Repositories without a stable sidecar Git host: Skeeper fails the commit when the sidecar is unreachable (the audited `SKEEPER_SKIP=1` bypass exists, but it is not a substitute for a working remote).
+- Storing build artifacts, generated code, or large binaries. Default guardrails cap mutating plans at 100 files and 10 MiB on purpose.
 
 ## Development
 
