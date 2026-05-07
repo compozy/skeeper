@@ -1,4 +1,0 @@
-interface:
-  display_name: "Skeeper Project"
-  short_description: "Work correctly in the skeeper repo"
-  default_prompt: "Use $skeeper-project before changing code, tests, docs, or release workflows in the skeeper repository."
