@@ -1,3 +1,14 @@
+## 0.1.2 - 2026-05-07
+
+
+### 📚 Documentation
+
+- Update readme
+
+- Remove skill from readme
+
+- Remove wrong skill
+
 ## 0.1.1 - 2026-05-07
 
 
