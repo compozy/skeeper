@@ -100,8 +100,6 @@ namespaces:
       - "**/*.spec.md"
     exclude:
       - "docs/specs/private/**"
-
-bootstrap: brew tap compozy/compozy && brew install --cask skeeper
 ```
 
 Advanced operational defaults are optional:
