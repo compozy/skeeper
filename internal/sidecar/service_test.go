@@ -113,6 +113,44 @@ func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
 	}
 }
 
+func TestServiceSyncCopiesProjectIdentityIntoSidecarClone(t *testing.T) {
+	isolateGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	git(t, root, "config", "user.name", "Skeeper CI")
+	git(t, root, "config", "user.email", "skeeper-ci@example.com")
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+	git(t, root, "add", config.Filename, "src/auth/SPEC.md")
+	git(t, root, "commit", "-m", "bootstrap")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	sidecarDir := filepath.Join(root, sidecar.DirName)
+	if got := gitOutput(t, sidecarDir, "config", "--local", "--get", "user.name"); got != "Skeeper CI" {
+		t.Fatalf("sidecar user.name mismatch: got %q", got)
+	}
+	if got := gitOutput(t, sidecarDir, "config", "--local", "--get", "user.email"); got != "skeeper-ci@example.com" {
+		t.Fatalf("sidecar user.email mismatch: got %q", got)
+	}
+	if got := gitOutput(
+		t,
+		sidecarDir,
+		"log",
+		"-1",
+		"--format=%an <%ae>",
+	); got != "Skeeper CI <skeeper-ci@example.com>" {
+		t.Fatalf("sidecar commit author mismatch: got %q", got)
+	}
+}
+
 func TestServiceVerifyAndFSCKUseLockfile(t *testing.T) {
 	setGitIdentity(t)
 
@@ -1139,6 +1177,42 @@ func setGitIdentity(t *testing.T) {
 	t.Setenv("GIT_AUTHOR_EMAIL", "skeeper@example.com")
 	t.Setenv("GIT_COMMITTER_NAME", "skeeper tests")
 	t.Setenv("GIT_COMMITTER_EMAIL", "skeeper@example.com")
+}
+
+func isolateGitIdentity(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+	t.Setenv("GIT_CONFIG_VALUE_0", "true")
+	unsetEnv(t, "EMAIL")
+	unsetEnv(t, "GIT_AUTHOR_NAME")
+	unsetEnv(t, "GIT_AUTHOR_EMAIL")
+	unsetEnv(t, "GIT_COMMITTER_NAME")
+	unsetEnv(t, "GIT_COMMITTER_EMAIL")
+}
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	value, ok := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if ok {
+			if err := os.Setenv(key, value); err != nil {
+				t.Fatalf("restore %s: %v", key, err)
+			}
+			return
+		}
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("restore unset %s: %v", key, err)
+		}
+	})
 }
 
 func git(t *testing.T, dir string, args ...string) {

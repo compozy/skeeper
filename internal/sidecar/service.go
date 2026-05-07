@@ -320,6 +320,9 @@ func (s *Service) Init(ctx context.Context, dir string, opts InitOptions) (InitR
 	if _, err := s.runner.Run(ctx, root, "git", "clone", sidecarURL, DirName); err != nil {
 		return InitResult{}, fmt.Errorf("clone sidecar into %s: %w", DirName, err)
 	}
+	if err := s.ensureSidecarCommitIdentity(ctx, root, sidecarDir); err != nil {
+		return InitResult{}, err
+	}
 	cfg := config.Config{
 		Sidecar:   sidecarURL,
 		Bootstrap: strings.TrimSpace(opts.Bootstrap),
@@ -1509,7 +1512,7 @@ func (s *Service) loadProject(ctx context.Context, dir string) (string, config.C
 func (s *Service) ensureClone(ctx context.Context, root, url string) error {
 	sidecarDir := sidecarPath(root)
 	if exists(filepath.Join(sidecarDir, ".git")) {
-		return nil
+		return s.ensureSidecarCommitIdentity(ctx, root, sidecarDir)
 	}
 	if exists(sidecarDir) {
 		return fmt.Errorf("%s exists but is not a git clone", DirName)
@@ -1517,7 +1520,50 @@ func (s *Service) ensureClone(ctx context.Context, root, url string) error {
 	if _, err := s.runner.Run(ctx, root, "git", "clone", url, DirName); err != nil {
 		return fmt.Errorf("clone sidecar into %s: %w", DirName, err)
 	}
+	if err := s.ensureSidecarCommitIdentity(ctx, root, sidecarDir); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Service) ensureSidecarCommitIdentity(ctx context.Context, root, sidecarDir string) error {
+	for _, key := range []string{"user.name", "user.email"} {
+		sidecarValue, err := s.gitConfigValue(ctx, sidecarDir, true, key)
+		if err != nil {
+			return fmt.Errorf("read sidecar git config %s: %w", key, err)
+		}
+		if sidecarValue != "" {
+			continue
+		}
+		projectValue, err := s.gitConfigValue(ctx, root, false, key)
+		if err != nil {
+			return fmt.Errorf("read project git config %s: %w", key, err)
+		}
+		if projectValue == "" {
+			continue
+		}
+		if _, err := s.runner.Run(ctx, sidecarDir, "git", "config", "--local", key, projectValue); err != nil {
+			return fmt.Errorf("configure sidecar git config %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) gitConfigValue(ctx context.Context, dir string, local bool, key string) (string, error) {
+	args := []string{"config"}
+	if local {
+		args = append(args, "--local")
+	}
+	args = append(args, "--get", key)
+	result, err := s.runner.Run(ctx, dir, "git", args...)
+	if err != nil {
+		var commandErr *gitexec.CommandError
+		if errors.As(err, &commandErr) && commandErr.ExitCode == 1 && strings.TrimSpace(commandErr.Stderr) == "" {
+			return "", nil
+		}
+		return "", err
+	}
+	return gitexec.TrimmedStdout(result), nil
 }
 
 func (s *Service) ensureBranch(ctx context.Context, sidecarDir, branch string) error {

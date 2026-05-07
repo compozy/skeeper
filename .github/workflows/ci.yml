@@ -182,6 +182,7 @@ jobs:
           git -C "$project" commit -m "bootstrap specs"
           (
             cd "$project"
+            "$SKEEPER_BIN" init --sidecar "$remote" --namespace project --patterns "**/SPEC.md"
             "$SKEEPER_BIN" sync --force
           )
           git -C "$project" add .gitignore .gitattributes skeeper.lock

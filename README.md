@@ -22,7 +22,7 @@ Spec docs drift from code, or they bloat every PR. Skeeper picks neither.
 
 It mirrors `SPEC.md`, ADRs, RFCs, and AI plan files into a sidecar Git repository and commits a tiny `skeeper.lock` to your main repo that pins every commit to exact sidecar commits. PR diffs stay focused on code, spec history stays auditable, and nothing silently drifts because the managed Git hooks fail the commit if the sidecar state cannot be proven.
 
-## Highlights
+## ✨ Highlights
 
 - **Lockfile-backed reliability.** `skeeper.lock` records sidecar URL, source branch, namespace branch, sidecar commit, per-namespace digest, file count, and byte count.
 - **Strict managed hooks.** The managed `pre-commit` and `pre-merge-commit` hooks sync staged content, push the sidecar, write and stage `skeeper.lock`, and fail closed. The managed `pre-push` hook verifies the lock against the sidecar remote.
@@ -33,13 +33,13 @@ It mirrors `SPEC.md`, ADRs, RFCs, and AI plan files into a sidecar Git repositor
 - **Agent-friendly commands.** `status`, `sync`, `verify`, `fsck`, `hooks check`, `repair status`, `pattern`, `adopt`, and `untrack` all support deterministic output where needed.
 - **Skill for AI agents.** A bundled skill at [`.agents/skills/skeeper/SKILL.md`](.agents/skills/skeeper/SKILL.md) teaches coding agents the strict-sync workflow, namespaces, and recovery commands.
 
-## Who Is This For
+## 🎯 Who Is This For
 
 - Teams using AI coding agents that produce `SPEC.md`, PRD, TechSpec, and plan markdown next to code.
 - Engineering organizations running ADRs, RFCs, and design docs in-repo without making every PR a docs+code review.
 - Solo developers who want full spec history (`git log`, `git blame`, branches, PRs) without polluting their main repository's diff.
 
-## Installation
+## 📦 Installation
 
 ```bash
 go install github.com/compozy/skeeper/cmd/skeeper@latest
@@ -52,29 +52,39 @@ Prerequisites:
 - `git` on `PATH`
 - `gh` only when `skeeper init` creates a new GitHub sidecar repo
 
-## How It Works
+## 🔄 How It Works
 
 Spec files live in the main worktree but are ignored by the main repository through a managed `.gitignore` block. The sidecar repository stores mirrored files under `<namespace>/<path>` and pushes them to `<namespace>/__branches__/<source-branch>`.
 
 On commit, the managed `pre-commit` block runs last. On automatic merge commits, the managed `pre-merge-commit` block runs the same strict sync path because Git does not run `pre-commit` for merge commits. Both hooks build a plan from the staged index plus explicitly owned ignored/untracked spec paths, fetch and rebase sidecar branches, mirror content into `.skeeper/`, commit and push the sidecar, write `skeeper.lock`, and stage that lock before Git creates the main commit.
 
 ```mermaid
-flowchart LR
-    A[git commit] --> B[existing user hook content]
-    B --> C[skeeper pre-commit block]
-    C --> D[reconcile staged specs and ownership]
-    D --> E[fetch/rebase sidecar branch]
-    E --> F[mirror namespace files]
-    F --> G[commit and push sidecar]
-    G --> H[write and stage skeeper.lock]
-    H --> I[main commit proceeds]
-    I --> J[git push]
-    J --> K[skeeper pre-push verify]
+flowchart TD
+    Start([👤 git commit]):::user --> UserHook[🪝 Existing user hook content]:::user
+    UserHook --> Block
+
+    subgraph Block [📦 Skeeper pre-commit block]
+        direction TB
+        S1[🧮 Reconcile staged specs<br/>+ ownership] --> S2[🔄 Fetch &amp; rebase<br/>sidecar branch]
+        S2 --> S3[🪞 Mirror namespace files<br/>into .skeeper/]
+        S3 --> S4[📤 Commit &amp; push sidecar]
+        S4 --> S5[🔒 Write &amp; stage<br/>skeeper.lock]
+    end
+
+    Block --> Commit[✅ Main commit proceeds]:::ok
+    Commit --> Push([🚀 git push]):::user
+    Push --> Verify[🔍 Skeeper pre-push verify]:::skeeper
+    Verify --> Done([🎉 Sidecar verified]):::ok
+
+    classDef user fill:#dbeafe,stroke:#1d4ed8,color:#0c1e3e
+    classDef skeeper fill:#fef3c7,stroke:#b45309,color:#3b2c00
+    classDef ok fill:#dcfce7,stroke:#15803d,color:#052e16
+    class S1,S2,S3,S4,S5 skeeper
 ```
 
 If sync fails, the commit fails. This is intentional: a committed main change should not silently drift from the sidecar. The audited bypass is `SKEEPER_SKIP=1`; it records `.git/skeeper/bypass.json`, prints a warning, and `pre-push`, `status`, `fsck`, and `verify` continue to surface stale-lock diagnostics until `skeeper sync` repairs the state. `git commit --no-verify` is unsupported because Git skips all hook code and cannot record an audit trail.
 
-## Configuration
+## ⚙️ Configuration
 
 `skeeper init` writes `.skeeper.yml` at the repository root. Commit it.
 
@@ -127,7 +137,7 @@ Local-only state lives under `.git/skeeper/`:
 | `transaction.json` | Current resumable mutating operation and phase |
 | `bypass.json`      | Latest audited strict-hook bypass              |
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
 skeeper init
@@ -163,7 +173,7 @@ git commit -m "auth: design OAuth provider flow"
 
 The `pre-commit` and `pre-merge-commit` hooks mirror specs and stage `skeeper.lock`. If a hook stages a new lock, review it and include it in the commit.
 
-## Failed Sync Recovery
+## 🛟 Failed Sync Recovery
 
 Inspect local repair state:
 
@@ -190,7 +200,7 @@ skeeper sync
 skeeper verify
 ```
 
-## CLI Reference
+## 📖 CLI Reference
 
 ```bash
 skeeper init [flags]
@@ -222,7 +232,7 @@ Command notes:
 - `log --latest` fetches the namespace branch and reads its latest history instead of the locked commit.
 - `hooks install` removes legacy Skeeper post-commit blocks, installs strict pre-commit/pre-merge-commit/pre-push blocks, writes `.gitattributes`, and configures the `skeeper.lock` merge driver.
 
-## CI Action
+## 🤖 CI Action
 
 Use the same-repository Action to verify `skeeper.lock` in CI:
 
@@ -257,7 +267,7 @@ Credential precedence:
 
 Secrets are masked before configuration. The wrapper downloads the released Skeeper binary for the action ref/tag and delegates verification to the CLI.
 
-## Troubleshooting
+## 🩺 Troubleshooting
 
 **`SKEEPER_SKIP=1` was used**
 
@@ -279,14 +289,14 @@ The main commit and sidecar remote disagree. Run `skeeper sync`, include the upd
 
 Move shared files into exactly one namespace by adding `exclude:` entries. Skeeper does not use order-based precedence.
 
-## When Skeeper Is the Wrong Tool
+## 🚫 When Skeeper Is the Wrong Tool
 
 - Repositories where specs already belong in the main diff and reviewers explicitly want them inline.
 - Teams that need PR review on the spec content itself before merge — Skeeper mirrors after the main commit succeeds, by design.
 - Repositories without a stable sidecar Git host: Skeeper fails the commit when the sidecar is unreachable (the audited `SKEEPER_SKIP=1` bypass exists, but it is not a substitute for a working remote).
 - Storing build artifacts, generated code, or large binaries. Default guardrails cap mutating plans at 100 files and 10 MiB on purpose.
 
-## Development
+## 🛠️ Development
 
 ```bash
 mise install
@@ -308,6 +318,6 @@ make release-snapshot
 
 Contributor guidance, commit conventions, and agent instructions live in [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md).
 
-## License
+## 📄 License
 
 [MIT](LICENSE)
