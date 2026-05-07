@@ -1,15 +1,8 @@
-## 0.1.1 - 2026-05-07
-
-
-### 🎉 Features
-
-- Sync on init
-
-- Multiple namespaces
+## 0.1.2 - 2026-05-07
 
 
 ### 📚 Documentation
 
-- Add official skill
-
 - Update readme
+
+- Remove skill from readme
