@@ -1,0 +1,11 @@
+sidecar: git@github.com:compozy/specs.git
+
+namespaces:
+  - name: skeeper
+    patterns:
+      - ".compozy/tasks/**"
+      - "docs/plans/**"
+      - "docs/_refacs/**"
+      - ".codex/ledger/**"
+      - ".codex/plans/**"
+    respect_gitignore: false

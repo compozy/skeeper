@@ -13,3 +13,12 @@ node_modules/
 .codex/ledger
 .codex/plans
 docs/plans
+
+# >>> skeeper ignored specs >>>
+.skeeper/
+.compozy/tasks/**
+docs/plans/**
+docs/_refacs/**
+.codex/ledger/**
+.codex/plans/**
+# <<< skeeper ignored specs <<<

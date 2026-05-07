@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "sidecar": "git@github.com:compozy/specs.git",
+  "source_branch": "main",
+  "namespaces": [
+    {
+      "name": "skeeper",
+      "sidecar_branch": "skeeper/__branches__/main",
+      "commit": "0962f04d2eaea90b300bbd0c6b4be427a90de7af",
+      "digest": "sha256:cdd02fffe95e5fbfed5b2c13978c39e3db9c74f324d376156daca7a3512939e6",
+      "files": 24,
+      "bytes": 131659
+    }
+  ]
+}
