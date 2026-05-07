@@ -1,45 +1,15 @@
-## 0.1.0 - 2026-05-06
-
-
-### ♻️  Refactoring
-
-- Libraries
+## 0.1.1 - 2026-05-07
 
 
 ### 🎉 Features
 
-- First version
+- Sync on init
 
-- Add directory
-
-
-### 🐛 Bug Fixes
-
-- Address final-verification blockers and risks
+- Multiple namespaces
 
 
 ### 📚 Documentation
 
-- Readme
+- Add official skill
 
-
-### 📦 Build System
-
-- Release
-
-- Changelog fix
-
-
-### 🔧 CI/CD
-
-- Codeowners
-
-
-### 🔧 Miscellaneous Tasks
-
-- Bootstrap skeeper from go-devstack
-
-
-### 🧪 Testing
-
-- Fix e2e
+- Update readme
