@@ -348,6 +348,10 @@ make release-snapshot  # requires GoReleaser Pro in PATH, or GORELEASER_KEY for 
 
 Contributor guidance, commit conventions, and the agent skill dispatch protocol live in [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md).
 
+## 🤖 Official Agent Skill
+
+`skeeper` ships its own first-party agent skill at [`skills/skeeper-project/SKILL.md`](skills/skeeper-project/SKILL.md). LLM agents working in this repository should load it before reading or modifying code — it captures the workflow, project rules, and verification gates that aren't obvious from the source alone, and points to `references/domain-map.md` and `references/repo-contract.md` for package boundaries and change rules.
+
 ## 🤝 Contributing
 
 Contributions are welcome. Open an issue to discuss larger changes, or send a pull request for fixes and small improvements. All commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `test`), enforced by `commitlint`.
