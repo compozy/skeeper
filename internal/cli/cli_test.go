@@ -44,15 +44,70 @@ func TestExecute_HelpListsSidecarCommands(t *testing.T) {
 			t.Fatalf("expected exit 0, got %d (stderr=%q)", code, stderr.String())
 		}
 		help := stdout.String()
-		for _, command := range []string{"init", "hydrate", "sync", "status", "log", "version"} {
+		for _, command := range []string{
+			"init",
+			"hydrate",
+			"sync",
+			"adopt",
+			"untrack",
+			"pattern",
+			"fsck",
+			"verify",
+			"hooks",
+			"merge-driver",
+			"repair",
+			"status",
+			"log",
+			"version",
+		} {
 			if !strings.Contains(help, command) {
 				t.Fatalf("expected help to include %q, got:\n%s", command, help)
 			}
 		}
-		if strings.Contains(help, "run") {
+		if strings.Contains(help, "\n  run ") {
 			t.Fatalf("did not expect scaffold run command in help:\n%s", help)
 		}
 	})
+}
+
+func TestExecute_SubcommandHelp(t *testing.T) {
+	commands := [][]string{
+		{"init"},
+		{"hydrate"},
+		{"sync"},
+		{"adopt"},
+		{"untrack"},
+		{"pattern"},
+		{"pattern", "test"},
+		{"pattern", "add"},
+		{"fsck"},
+		{"verify"},
+		{"hooks"},
+		{"hooks", "install"},
+		{"hooks", "check"},
+		{"merge-driver"},
+		{"repair"},
+		{"repair", "status"},
+		{"repair", "resume"},
+		{"repair", "abort"},
+		{"status"},
+		{"log"},
+		{"version"},
+	}
+
+	for _, command := range commands {
+		t.Run(strings.Join(command, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			args := append(append([]string{}, command...), "--help")
+			code := cli.Execute(context.Background(), args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("expected help exit 0, got %d (stderr=%q)", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Usage:") {
+				t.Fatalf("expected usage output, got %q", stdout.String())
+			}
+		})
+	}
 }
 
 func TestExecute_InitWritesNamespace(t *testing.T) {

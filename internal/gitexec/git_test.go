@@ -114,16 +114,6 @@ func TestGitLocalOperationsWithGoGit(t *testing.T) {
 	if !dirty {
 		t.Fatal("expected dirty repo")
 	}
-	if err := helper.AddAll(ctx, root); err != nil {
-		t.Fatalf("add all: %v", err)
-	}
-	dirty, err = helper.IsDirty(ctx, root)
-	if err != nil {
-		t.Fatalf("dirty after add: %v", err)
-	}
-	if !dirty {
-		t.Fatal("expected staged repo to be dirty")
-	}
 }
 
 func TestGitAheadBehindCounts(t *testing.T) {

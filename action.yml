@@ -1,0 +1,128 @@
+name: Skeeper Verify
+description: Download the released Skeeper binary and run a lockfile verification command.
+
+inputs:
+  version:
+    description: Skeeper release tag to download. Defaults to the action ref.
+    required: false
+    default: ""
+  args:
+    description: Arguments passed to skeeper, one argument per line.
+    required: false
+    default: "verify"
+  binary:
+    description: Existing skeeper binary to use instead of downloading a release.
+    required: false
+    default: ""
+  working-directory:
+    description: Directory where skeeper should run.
+    required: false
+    default: "."
+  ssh-private-key:
+    description: SSH private key for sidecar access. Takes precedence over token.
+    required: false
+    default: ""
+  token:
+    description: HTTPS token for sidecar access when ssh-private-key is not set.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Skeeper
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_BINARY: ${{ inputs.binary }}
+      run: |
+        set -euo pipefail
+
+        if [ -n "$INPUT_BINARY" ]; then
+          dest="${RUNNER_TEMP}/skeeper-bin"
+          mkdir -p "$dest"
+          cp "$INPUT_BINARY" "${dest}/skeeper"
+          chmod +x "${dest}/skeeper"
+          echo "$dest" >> "$GITHUB_PATH"
+          exit 0
+        fi
+
+        tag="${INPUT_VERSION:-${GITHUB_ACTION_REF:-}}"
+        if [ -z "$tag" ]; then
+          echo "skeeper action requires a release tag through inputs.version or GITHUB_ACTION_REF" >&2
+          exit 1
+        fi
+        version="${tag#v}"
+
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64) os=linux; arch=x86_64; ext=tar.gz ;;
+          Linux-ARM64) os=linux; arch=arm64; ext=tar.gz ;;
+          macOS-X64) os=darwin; arch=x86_64; ext=tar.gz ;;
+          macOS-ARM64) os=darwin; arch=arm64; ext=tar.gz ;;
+          Windows-X64) os=windows; arch=x86_64; ext=zip ;;
+          *) echo "unsupported runner ${RUNNER_OS}-${RUNNER_ARCH}" >&2; exit 1 ;;
+        esac
+
+        asset="skeeper_${version}_${os}_${arch}.${ext}"
+        url="https://github.com/compozy/skeeper/releases/download/${tag}/${asset}"
+        dest="${RUNNER_TEMP}/skeeper"
+        mkdir -p "$dest"
+        curl -fsSL "$url" -o "${dest}/${asset}"
+        if [ "$ext" = "zip" ]; then
+          unzip -q "${dest}/${asset}" -d "$dest"
+        else
+          tar -xzf "${dest}/${asset}" -C "$dest"
+        fi
+        chmod +x "${dest}/skeeper"
+        echo "$dest" >> "$GITHUB_PATH"
+
+    - name: Configure sidecar credentials
+      shell: bash
+      env:
+        SKEEPER_SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+        SKEEPER_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+
+        if [ -n "$SKEEPER_SSH_PRIVATE_KEY" ]; then
+          echo "::add-mask::$SKEEPER_SSH_PRIVATE_KEY"
+          key_path="${RUNNER_TEMP}/skeeper_sidecar_key"
+          printf '%s\n' "$SKEEPER_SSH_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          {
+            printf 'GIT_SSH_COMMAND='
+            printf 'ssh -i %q -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new' "$key_path"
+            printf '\n'
+          } >> "$GITHUB_ENV"
+          exit 0
+        fi
+
+        if [ -n "$SKEEPER_TOKEN" ]; then
+          echo "::add-mask::$SKEEPER_TOKEN"
+          gitconfig="${RUNNER_TEMP}/skeeper.gitconfig"
+          git config --file "$gitconfig" url."https://x-access-token:${SKEEPER_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --file "$gitconfig" url."https://x-access-token:${SKEEPER_TOKEN}@github.com/".insteadOf "git@github.com:"
+          echo "GIT_CONFIG_GLOBAL=$gitconfig" >> "$GITHUB_ENV"
+        fi
+
+    - name: Run Skeeper
+      shell: bash
+      env:
+        SKEEPER_ARGS: ${{ inputs.args }}
+        SKEEPER_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        cd "$SKEEPER_WORKING_DIRECTORY"
+        mapfile -t skeeper_args <<< "$SKEEPER_ARGS"
+        skeeper "${skeeper_args[@]}"
+
+    - name: Cleanup Skeeper credentials
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -f "${RUNNER_TEMP}/skeeper_sidecar_key" "${RUNNER_TEMP}/skeeper.gitconfig"
+        {
+          echo "GIT_SSH_COMMAND="
+          echo "GIT_CONFIG_GLOBAL="
+        } >> "$GITHUB_ENV"

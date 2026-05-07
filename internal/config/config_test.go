@@ -50,6 +50,43 @@ namespaces:
 	}
 }
 
+func TestLoadAppliesSettingsDefaultsAndRespectGitignore(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	content := `
+sidecar: git@github.com:user/project-specs.git
+namespaces:
+  - name: generated
+    patterns:
+      - "generated/specs/**"
+    respect_gitignore: false
+`
+	if err := os.WriteFile(filepath.Join(dir, Filename), []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Settings.Guardrails.MaxFiles != DefaultGuardrailMaxFiles {
+		t.Fatalf("max files default mismatch: %#v", cfg.Settings.Guardrails)
+	}
+	if cfg.Settings.Guardrails.MaxBytes != DefaultGuardrailMaxBytes {
+		t.Fatalf("max bytes default mismatch: %#v", cfg.Settings.Guardrails)
+	}
+	if cfg.Settings.Hooks.PrePushTimeout != DefaultPrePushTimeout.String() {
+		t.Fatalf("pre-push timeout default mismatch: %#v", cfg.Settings.Hooks)
+	}
+	if cfg.Settings.Hooks.AllowSkipEnv != DefaultAllowSkipEnv {
+		t.Fatalf("allow skip env default mismatch: %#v", cfg.Settings.Hooks)
+	}
+	if cfg.Namespaces[0].RespectsGitignore() {
+		t.Fatal("expected respect_gitignore: false to survive normalization")
+	}
+}
+
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	t.Parallel()
 
@@ -131,6 +168,25 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 				Sidecar: "git@github.com:user/project-specs.git",
 				Namespaces: []Namespace{
 					{Name: "project", Patterns: []string{"**/SPEC.md"}, Exclude: []string{"["}},
+				},
+			},
+		},
+		{
+			name: "negative pattern",
+			cfg: Config{
+				Sidecar: "git@github.com:user/project-specs.git",
+				Namespaces: []Namespace{
+					{Name: "project", Patterns: []string{"!docs/**"}},
+				},
+			},
+		},
+		{
+			name: "invalid hook env",
+			cfg: Config{
+				Sidecar:  "git@github.com:user/project-specs.git",
+				Settings: Settings{Hooks: HookSettings{AllowSkipEnv: "not valid"}},
+				Namespaces: []Namespace{
+					{Name: "project", Patterns: []string{"**/SPEC.md"}},
 				},
 			},
 		},

@@ -9,9 +9,6 @@
     <a href="https://pkg.go.dev/github.com/compozy/skeeper">
       <img src="https://pkg.go.dev/badge/github.com/compozy/skeeper.svg" alt="Go Reference">
     </a>
-    <a href="https://goreportcard.com/report/github.com/compozy/skeeper">
-      <img src="https://goreportcard.com/badge/github.com/compozy/skeeper" alt="Go Report Card">
-    </a>
     <a href="LICENSE">
       <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT">
     </a>
@@ -21,338 +18,280 @@
   </p>
 </div>
 
-Specs and code want to live together. Spec files (`SPEC.md`, `docs/specs/*`, `.claude/plans/*`, ADRs, RFCs) belong next to the code they describe — but committing them to your main repo bloats every PR with documentation noise, and ignoring them loses history. `skeeper` runs a sidecar Git repository that mirrors matched spec files on every commit. You edit specs at their natural paths, your main PRs stay focused on code, and a separate Git history keeps full `git log`, `git blame`, and branch-aware versioning of every spec change. One `skeeper init` and the post-commit hook does the rest — without ever blocking your `git commit`.
+`skeeper` keeps spec artifacts next to the code they describe without putting those files in the main repository history. It mirrors configured files into a sidecar Git repository, writes a tracked `skeeper.lock` that points each main commit at exact sidecar commits, and blocks commits or pushes when the sidecar state cannot be proven.
 
-## ✨ Highlights
+## Highlights
 
-- **One sidecar repo, full Git history.** Specs version normally — `git log`, `git blame`, branches, PRs — without touching your main repo's diff.
-- **Shared sidecars without collisions.** Named namespaces isolate stored paths and pushed branches inside one sidecar remote.
-- **Edit specs where they belong.** Spec files stay next to the code they describe. `skeeper` mirrors them into `.skeeper/` for you.
-- **A post-commit hook that never breaks your commit.** 750 ms foreground budget per namespace; on failure, the sync queues locally and retries on the next manual `skeeper sync`.
-- **Branch-aware mirroring.** Sidecar branches track main-tree branches, so feature work and `main` stay isolated.
-- **Fresh-clone hydration.** `skeeper hydrate` restores matched specs into a new clone so teammates start with full context.
-- **Glob-based pattern matching.** Doublestar globs (`**/SPEC.md`, `docs/specs/**`, `.claude/plans/**`) — match specs the way you actually organize them.
-- **Shells out to `git` and `gh`.** Reuses your existing GitHub auth. Every operation is debuggable with the same Git commands you already know.
-- **Single static binary, zero runtime deps.** Linux, macOS, Windows on amd64/arm64. CGO disabled.
+- **Lockfile-backed reliability.** `skeeper.lock` records sidecar URL, source branch, namespace branch, sidecar commit, per-namespace digest, file count, and byte count.
+- **Strict managed hooks.** The managed `pre-commit` and `pre-merge-commit` hooks sync staged content, push the sidecar, write and stage `skeeper.lock`, and fail closed. The managed `pre-push` hook verifies the lock against the sidecar remote.
+- **Specs stay local to their code.** Edit `SPEC.md`, `docs/specs/**`, `.claude/plans/**`, ADRs, RFCs, or custom globs where they naturally belong.
+- **Shared sidecars without collisions.** Namespaces isolate stored paths and sidecar branches inside one sidecar remote.
+- **Branch-aware history.** Namespace branches use `<namespace>/__branches__/<source-branch>`.
+- **Fresh-clone hydration.** `skeeper hydrate` restores files from the locked sidecar commits, not a best-effort latest branch.
+- **Agent-friendly commands.** `status`, `sync`, `verify`, `fsck`, `hooks check`, `repair status`, `pattern`, `adopt`, and `untrack` all support deterministic output where needed.
 
-## 📦 Installation
-
-#### Homebrew
-
-```bash
-brew tap compozy/compozy
-brew install --cask skeeper
-```
-
-#### NPM
-
-```bash
-npm install -g @compozy/skeeper
-```
-
-#### Go
+## Installation
 
 ```bash
 go install github.com/compozy/skeeper/cmd/skeeper@latest
 ```
 
-#### From Source
+Other release channels are available through GitHub Releases, Homebrew, NPM, and the distroless Docker image.
 
-```bash
-git clone git@github.com:compozy/skeeper.git
-cd skeeper && make verify && go build -o bin/skeeper ./cmd/skeeper
-```
-
-#### Docker
-
-```bash
-git clone git@github.com:compozy/skeeper.git
-cd skeeper && make docker-build      # builds skeeper:dev (distroless, nonroot)
-docker run --rm -v "$PWD:/workspace" -w /workspace skeeper:dev status
-```
-
-#### Prerequisites
+Prerequisites:
 
 - `git` on `PATH`
-- `gh` (GitHub CLI) **only when `skeeper init` creates a new sidecar** — existing sidecars can be reused with `--sidecar`. Day-to-day commands need only `git`.
+- `gh` only when `skeeper init` creates a new GitHub sidecar repo
 
-## 🔄 How It Works
+## How It Works
 
-Spec files live at their natural paths next to code. Your main repo's `.gitignore` lists the effective namespace patterns plus `.skeeper/`, so neither owned specs nor the sidecar clone ever appear in a main-repo diff.
+Spec files live in the main worktree but are ignored by the main repository through a managed `.gitignore` block. The sidecar repository stores mirrored files under `<namespace>/<path>` and pushes them to `<namespace>/__branches__/<source-branch>`.
 
-On every `git commit`, the managed post-commit hook runs `skeeper sync --hook` with a 750 ms foreground budget per namespace. `skeeper` matches files against namespace patterns, copies them into `.skeeper/`, commits with a reference to the main commit SHA, and pushes to the sidecar remote.
-
-Each namespace stores files under `<namespace>/<path>` in the sidecar and pushes branch `<namespace>/__branches__/<source-branch>`. For example, namespace `skills` on source branch `main` stores `skills/review.md` as `skills/skills/review.md` and pushes sidecar branch `skills/__branches__/main`.
-
-If anything fails — network, auth, push rejection, timeout — `skeeper` writes a retry record to `.git/skeeper/queue.json` with the failing namespace when one is known, appends a one-line audit entry to `.git/skeeper/sync.log`, and exits 0 so your `git commit` always succeeds. Run `skeeper sync` later to drain the queue.
+On commit, the managed `pre-commit` block runs last. On automatic merge commits, the managed `pre-merge-commit` block runs the same strict sync path because Git does not run `pre-commit` for merge commits. Both hooks build a plan from the staged index plus explicitly owned ignored/untracked spec paths, fetch and rebase sidecar branches, mirror content into `.skeeper/`, commit and push the sidecar, write `skeeper.lock`, and stage that lock before Git creates the main commit.
 
 ```mermaid
 flowchart LR
-    A[Developer<br/>git commit] --> B[post-commit hook<br/>skeeper sync --hook]
-    B --> C{Namespace sync within<br/>750 ms?}
-    C -- yes --> D[Copy matched specs<br/>into .skeeper/]
-    D --> E[git commit<br/>in sidecar]
-    E --> F[git push<br/>to sidecar remote]
-    C -- no / error --> G[Write namespace retry record<br/>.git/skeeper/queue.json]
-    G --> H[Hook exits 0<br/>main commit succeeds]
-    H -. later .-> I[skeeper sync<br/>drains queue]
-    I --> D
+    A[git commit] --> B[existing user hook content]
+    B --> C[skeeper pre-commit block]
+    C --> D[reconcile staged specs and ownership]
+    D --> E[fetch/rebase sidecar branch]
+    E --> F[mirror namespace files]
+    F --> G[commit and push sidecar]
+    G --> H[write and stage skeeper.lock]
+    H --> I[main commit proceeds]
+    I --> J[git push]
+    J --> K[skeeper pre-push verify]
 ```
 
-## ⚙️ Configuration
+If sync fails, the commit fails. This is intentional: a committed main change should not silently drift from the sidecar. The audited bypass is `SKEEPER_SKIP=1`; it records `.git/skeeper/bypass.json`, prints a warning, and `pre-push`, `status`, `fsck`, and `verify` continue to surface stale-lock diagnostics until `skeeper sync` repairs the state. `git commit --no-verify` is unsupported because Git skips all hook code and cannot record an audit trail.
 
-`skeeper init` writes `.skeeper.yml` at the repo root. Commit it — your teammates need it for `skeeper hydrate`.
+## Configuration
+
+`skeeper init` writes `.skeeper.yml` at the repository root. Commit it.
 
 ```yaml
-# Required: sidecar repository URL
 sidecar: git@github.com:user/myproject-specs.git
 
-# Required: namespaces route files into sidecar paths and branches
 namespaces:
-  - name: skills
-    patterns:
-      - "skills/*.md"
-
-  - name: myproject
+  - name: project
     patterns:
       - "**/SPEC.md"
       - "docs/specs/**"
       - ".claude/plans/**"
       - "**/*.spec.md"
     exclude:
-      - "skills/*.md"
+      - "docs/specs/private/**"
 
-# Optional: install one-liner shown to teammates after `skeeper hydrate`
 bootstrap: brew tap compozy/compozy && brew install --cask skeeper
 ```
 
-Unknown keys are rejected — config errors fail loud, not silently.
+Advanced operational defaults are optional:
 
-Every namespace needs a `name` and at least one `patterns` glob. `exclude` removes ownership from that namespace; if another namespace owns the excluded files, they stay tracked there. A file owned by more than one namespace is a configuration error because hidden precedence would make deletes unsafe.
+```yaml
+settings:
+  guardrails:
+    max_files: 100
+    max_bytes: 10485760
+  hooks:
+    pre_push_timeout: 30s
+    allow_skip_env: SKEEPER_SKIP
 
-`skeeper init` writes one namespace by default. Add more namespaces by editing `.skeeper.yml`.
-
-Local-only state lives under `.git/skeeper/` (already gitignored by Git's hooks directory):
-
-| File         | Purpose                                                |
-| ------------ | ------------------------------------------------------ |
-| `queue.json` | Pending retries from failed hook runs                  |
-| `sync.log`   | Append-only audit log of sync attempts and error codes |
-
-## 🚀 Quick Start
-
-### 1. Install
-
-```bash
-go install github.com/compozy/skeeper/cmd/skeeper@latest
+namespaces:
+  - name: generated
+    patterns:
+      - "generated/specs/**"
+    respect_gitignore: false
 ```
 
-### 2. Initialize the sidecar
+Rules:
 
-In a Git repo where you want to track specs:
+- Unknown keys are rejected.
+- Every namespace needs a `name` and at least one glob in `patterns`.
+- `exclude` is the only public exclusion mechanism. Negative globs in `patterns` are rejected.
+- Ownership must be unique. If two namespaces own the same file, the plan fails and asks for an `exclude` fix.
+- `respect_gitignore: false` bypasses root `.gitignore`, nested `.gitignore`, `.git/info/exclude`, and global excludes for that namespace. `.git/` and `.skeeper/` are always excluded.
+
+Local-only state lives under `.git/skeeper/`:
+
+| File               | Purpose                                        |
+| ------------------ | ---------------------------------------------- |
+| `transaction.json` | Current resumable mutating operation and phase |
+| `bypass.json`      | Latest audited strict-hook bypass              |
+
+## Quick Start
 
 ```bash
 skeeper init
 ```
 
-Interactive by default — opens a terminal form for the sidecar mode, repository name or URL, namespace, bootstrap command, and optional extra context globs. The interactive flow always includes the default spec globs (`**/SPEC.md`, `docs/specs/**`, `.claude/plans/**`, and `**/*.spec.md`) in the initial namespace; the extra context prompt starts empty and is only for additional folders or files you explicitly want in that namespace. Or pass values as flags:
+Interactive init asks for the sidecar mode, repository name or URL, namespace, bootstrap command, and optional extra context globs. With flags:
 
 ```bash
 skeeper init \
   --sidecar-name myproject-specs \
   --visibility private \
-  --namespace myproject \
+  --namespace project \
   --patterns "**/SPEC.md" \
-  --patterns ".claude/plans/**"
+  --patterns "docs/specs/**"
 ```
 
-To reuse one shared sidecar remote across multiple source repos:
+Use an existing shared sidecar:
 
 ```bash
 skeeper init \
   --sidecar git@github.com:user/shared-specs.git \
-  --namespace myproject \
+  --namespace project \
   --patterns "**/SPEC.md"
 ```
 
-`skeeper init` creates the GitHub repo with `gh repo create` unless `--sidecar` points to an existing remote. It clones the sidecar into `.skeeper/`, writes `.skeeper.yml`, updates `.gitignore`, and installs the post-commit hook. New init defaults the namespace to the source repo name.
-
-When using flags, repeated `--patterns` values are the complete pattern set written to `.skeeper.yml`; they do not append to the interactive defaults.
-
-### 3. Edit specs and commit normally
+Then edit specs and commit normally:
 
 ```bash
 $EDITOR src/auth/SPEC.md
-git add .
+git add src/auth/service.go src/auth/SPEC.md
 git commit -m "auth: design OAuth provider flow"
 ```
 
-The hook fires automatically. No extra step.
+The `pre-commit` and `pre-merge-commit` hooks mirror specs and stage `skeeper.lock`. If a hook stages a new lock, review it and include it in the commit.
 
-### 4. Inspect
+## Failed Sync Recovery
 
-```bash
-skeeper status                       # sidecar URL, branch mapping, last sync, pending count
-skeeper log src/auth/SPEC.md         # sidecar Git history for one file
-```
-
-### 5. Onboard a teammate
+Inspect local repair state:
 
 ```bash
-git clone git@github.com:user/myproject.git
-cd myproject
-skeeper hydrate
+skeeper repair status
 ```
 
-`hydrate` clones the sidecar into `.skeeper/`, restores matched specs into the working tree, and installs the hook.
-
-### 6. Recover from a failed sync
-
-If the hook ever queued work (network blip, push rejection):
+Resume the recorded operation when network/auth/sidecar contention has been fixed:
 
 ```bash
-skeeper sync           # drain queued retries, then run a fresh sync
-skeeper sync --pull    # rebase the sidecar branch first — useful when teammates pushed
+skeeper repair resume
 ```
 
-## 🧰 How Sync Works
+Abort only before the main index has been mutated:
 
-The post-commit hook is a _managed block_ in `.git/hooks/post-commit`, installed idempotently. It runs `skeeper sync --hook` with a 750 ms foreground budget per namespace so your `git commit` stays bounded even on a slow network.
+```bash
+skeeper repair abort
+```
 
-On the success path, `skeeper` matches files with doublestar globs, copies them into `.skeeper/`, then runs `git add`, `git commit`, and `git push` against the sidecar remote. Each namespace copies to `.skeeper/<namespace>/<path>` and pushes `<namespace>/__branches__/<source-branch>`. Sidecar commits reference the main-repo SHA so you can correlate spec changes back to the code change that triggered them.
+Run a fresh repair sync when a bypass or stale lock is reported:
 
-On the failure path — timeout, auth failure, network failure, or push rejection — `skeeper` writes a retry record to `.git/skeeper/queue.json` with the failing namespace when one is known, appends to `.git/skeeper/sync.log`, prints a one-line note, and the hook exits 0. The next `skeeper sync` drains the queue before running a normal sync. Use `skeeper sync --pull` when a teammate pushed sidecar updates between your commits; it fetches and rebases before pushing.
+```bash
+skeeper sync
+skeeper verify
+```
 
-This design has two consequences worth knowing:
-
-- **`git commit` never fails because of `skeeper`.** Worst case, you have queued work to drain.
-- **Conflicts surface as Git conflicts.** `skeeper sync --pull` stops if the rebase reports unresolved conflicts; resolve them in `.skeeper/` with normal Git tooling, then re-run.
-
-## 📖 CLI Reference
-
-<details>
-<summary><code>skeeper init</code> — Create and connect a sidecar specs repository</summary>
+## CLI Reference
 
 ```bash
 skeeper init [flags]
-```
-
-| Flag             | Default   | Description                                                  |
-| ---------------- | --------- | ------------------------------------------------------------ |
-| `--sidecar`      |           | Existing sidecar repository URL                              |
-| `--sidecar-name` |           | GitHub sidecar repository name or `OWNER/REPO`               |
-| `--visibility`   | `private` | GitHub visibility: `private`, `public`, or `internal`        |
-| `--namespace`    | repo slug | Initial sidecar namespace for this source repo               |
-| `--bootstrap`    |           | Optional install command stored in `.skeeper.yml`            |
-| `--patterns`     |           | Complete spec glob pattern set; repeat for multiple patterns |
-
-When run interactively, `init` opens a terminal form. It includes the default spec globs automatically, then asks whether to add extra context globs such as `AGENTS.md`, `CLAUDE.md`, or `.codex/plans/**`. It runs `gh repo create` for `--sidecar-name` or the create mode, but skips GitHub creation when `--sidecar` is provided. `--sidecar` and `--sidecar-name` are mutually exclusive.
-
-</details>
-
-<details>
-<summary><code>skeeper hydrate</code> — Restore spec files from the sidecar repository</summary>
-
-```bash
+skeeper sync [--dry-run] [--json] [--commit --message <msg>] [--force]
+skeeper adopt <path-or-glob>... [--dry-run] [--json] [--force] [--commit --message <msg>]
+skeeper untrack <path-or-glob>... [--dry-run] [--json] [--force] [--commit --message <msg>]
+skeeper pattern test <glob> [--namespace <name>] [--json]
+skeeper pattern add <glob> [--namespace <name>] [--exclude <glob>]... [--adopt-existing] [--dry-run] [--json] [--force] [--commit --message <msg>]
 skeeper hydrate
-```
-
-Use after a fresh clone of the main repo. `hydrate` clones the sidecar into `.skeeper/`, copies matched spec files into the working tree, and installs the post-commit hook. No flags.
-
-</details>
-
-<details>
-<summary><code>skeeper sync</code> — Mirror spec files into the sidecar repository</summary>
-
-```bash
-skeeper sync [flags]
-```
-
-| Flag     | Default | Description                                                                          |
-| -------- | ------- | ------------------------------------------------------------------------------------ |
-| `--pull` | `false` | Pull and rebase the sidecar branch before syncing                                    |
-| `--hook` | `false` | Run in post-commit hook mode: 750 ms foreground budget per namespace, always exits 0 |
-
-Drains queued retries from `.git/skeeper/queue.json`, then mirrors spec files into `.skeeper/`, commits, and pushes. Use `--pull` when teammates may have pushed sidecar updates between your commits. `--hook` is what the installed post-commit hook calls — you rarely run it manually.
-
-</details>
-
-<details>
-<summary><code>skeeper status</code> — Show sidecar sync status</summary>
-
-```bash
-skeeper status
-```
-
-Prints the sidecar URL, current source branch, one status block per namespace, last sync commit and age, remote state, tracked file counts, and pending queued syncs. No flags.
-
-</details>
-
-<details>
-<summary><code>skeeper log &lt;path&gt;</code> — Show sidecar history for a spec file</summary>
-
-```bash
-skeeper log <path>
-```
-
-Runs `git log` against the sidecar for one spec file. The path is relative to the main repo root, e.g. `skeeper log src/auth/SPEC.md`. `skeeper` resolves the current owning namespace and reads `<namespace>/<path>` inside that namespace branch.
-
-</details>
-
-<details>
-<summary><code>skeeper version</code> — Print build metadata</summary>
-
-```bash
+skeeper status [--json]
+skeeper log <path> [--latest]
+skeeper fsck [--json] [--source-branch <branch>]
+skeeper verify [--json] [--source-branch <branch>]
+skeeper hooks install [--json]
+skeeper hooks check [--json]
+skeeper merge-driver [--json]
+skeeper repair status|resume|abort [--json]
 skeeper version
 ```
 
-Prints `Version`, `Commit`, and `BuildDate` injected at build time via ldflags.
+Command notes:
 
-</details>
+- `sync` uses working-tree content and stages `skeeper.lock`. Hook mode uses staged index content.
+- `adopt` and `untrack` push sidecar coverage before removing main-index tracking.
+- `pattern add --adopt-existing` updates `.skeeper.yml`, updates the managed `.gitignore` block, then runs the same adoption transaction.
+- `verify` checks `skeeper.lock` against the sidecar remote and does not require hooks.
+- `fsck` compares current working-tree specs against locked sidecar content and does not mutate files or refs.
+- `hydrate` restores from locked sidecar commits by default.
+- `log --latest` fetches the namespace branch and reads its latest history instead of the locked commit.
+- `hooks install` removes legacy Skeeper post-commit blocks, installs strict pre-commit/pre-merge-commit/pre-push blocks, writes `.gitattributes`, and configures the `skeeper.lock` merge driver.
 
-## 🛠️ Development
+## CI Action
+
+Use the same-repository Action to verify `skeeper.lock` in CI:
+
+```yaml
+name: skeeper
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: compozy/skeeper@v0.1.1
+        with:
+          args: |
+            verify
+            --json
+          ssh-private-key: ${{ secrets.SKEEPER_SSH_PRIVATE_KEY }}
+```
+
+Credential precedence:
+
+1. `ssh-private-key` writes a temp key and sets `GIT_SSH_COMMAND`.
+2. `token` configures HTTPS GitHub credentials.
+3. Existing runner Git/SSH credentials are used when neither input is provided.
+
+Secrets are masked before configuration. The wrapper downloads the released Skeeper binary for the action ref/tag and delegates verification to the CLI.
+
+## Troubleshooting
+
+**`SKEEPER_SKIP=1` was used**
+
+Run `skeeper status`, then `skeeper sync`, then `skeeper verify`. The bypass journal remains visible until sync clears it.
+
+**Sidecar push was rejected**
+
+Run `skeeper repair status`. If the failure happened before main-index mutation, fix network/auth or sidecar contention and run `skeeper repair resume`. If the main index was already mutated, inspect the listed files manually.
+
+**`skeeper.lock` conflicts during merge**
+
+Run `skeeper hooks install` to ensure the merge driver is configured, then rerun the merge. Manual editing of scalar sidecar SHAs is unsupported; regenerate the lock through `skeeper merge-driver` or `skeeper sync`.
+
+**`verify` reports a lock mismatch**
+
+The main commit and sidecar remote disagree. Run `skeeper sync`, include the updated `skeeper.lock`, and rerun `skeeper verify`.
+
+**A namespace overlaps another namespace**
+
+Move shared files into exactly one namespace by adding `exclude:` entries. Skeeper does not use order-based precedence.
+
+## Development
 
 ```bash
-mise install      # provision Go 1.26.2, Bun 1.3.4, and CLI tools
+mise install
 bun install
 make hooks-install
-make verify       # fmt → lint → test → build (BLOCKING gate)
+make verify
 ```
 
 Common targets:
 
 ```bash
-make fmt          # gofmt every .go file
-make lint         # golangci-lint v2 + gopls modernize (zero tolerance)
-make test         # gotestsum + -race -parallel=4
-make build        # bin/skeeper with version ldflags
-make cover        # coverage.out + coverage.html
+make fmt
+make lint
+make test
+make build
+make cover
+make release-snapshot
 ```
 
-Releases are prepared through release pull requests and published with [GoReleaser Pro](.goreleaser.yml). A push to `main` creates or updates a release PR with `pr-release`; the release PR runs a GoReleaser dry run, and merging the release commit publishes GitHub release artifacts, the Homebrew cask, and the NPM package.
+Contributor guidance, commit conventions, and agent instructions live in [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md).
 
-Release publishing requires these GitHub Actions secrets:
-
-| Secret           | Purpose                                                       |
-| ---------------- | ------------------------------------------------------------- |
-| `RELEASE_TOKEN`  | Create/update release PRs, push release tags, update Homebrew |
-| `GORELEASER_KEY` | Run GoReleaser Pro                                            |
-| `NPM_TOKEN`      | Publish `@compozy/skeeper` and authenticate npm in release CI |
-
-Release notes are generated by `pr-release`. Add pending human-authored notes under `.release-notes/`; the release PR writes the current release body to `RELEASE_BODY.md` and prepends it to `RELEASE_NOTES.md`. The production workflow passes `RELEASE_BODY.md` to GoReleaser with the Skeeper release header and footer templates.
-
-Local release checks:
-
-```bash
-make release-snapshot  # requires GoReleaser Pro in PATH, or GORELEASER_KEY for the installer
-```
-
-Contributor guidance, commit conventions, and the agent skill dispatch protocol live in [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md).
-
-## 🤝 Contributing
-
-Contributions are welcome. Open an issue to discuss larger changes, or send a pull request for fixes and small improvements. All commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `test`), enforced by `commitlint`.
-
-## 📄 License
+## License
 
 [MIT](LICENSE)

@@ -56,6 +56,29 @@ func TestFindRespectsProjectGitignoreRules(t *testing.T) {
 	}
 }
 
+func TestFindCanBypassGitignoreRules(t *testing.T) {
+	setHermeticGitignoreEnv(t)
+	root := t.TempDir()
+	writeFile(t, root, ".gitignore", "generated/\n")
+	writeFile(t, root, "generated/specs/SPEC.md", "generated")
+	writeFile(t, root, ".git/SPEC.md", "git")
+	writeFile(t, root, ".skeeper/SPEC.md", "sidecar")
+
+	got, err := FindContextWithOptions(
+		t.Context(),
+		root,
+		[]string{"generated/**", ".git/**", ".skeeper/**"},
+		Options{RespectGitignore: false},
+	)
+	if err != nil {
+		t.Fatalf("find matches: %v", err)
+	}
+	want := []string{"generated/specs/SPEC.md"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("matches mismatch:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func TestFindIgnoresSkeeperManagedGitignoreBlock(t *testing.T) {
 	setHermeticGitignoreEnv(t)
 	root := t.TempDir()

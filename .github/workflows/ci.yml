@@ -75,6 +75,9 @@ jobs:
                 .github/*|.go-version|mise.toml|.editorconfig)
                   tooling=true
                   ;;
+                action.yml)
+                  tooling=true
+                  ;;
                 .bun-version|.oxfmtrc.json|.oxlintrc.json|.commitlintrc.yaml|package.json|bun.lock|.husky/*|RELEASE_BODY.md|RELEASE_NOTES.md|.release-notes/*|LICENSE)
                   tooling=true
                   ;;
@@ -131,3 +134,66 @@ jobs:
             bin
           if-no-files-found: ignore
           retention-days: 7
+
+  action:
+    name: Action smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+        with:
+          install-tools: "false"
+
+      - name: Lint action metadata
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@latest
+
+      - name: Build local Skeeper binary
+        run: go build -o bin/skeeper ./cmd/skeeper
+
+      - name: Prepare hermetic sidecar project
+        id: fixture
+        env:
+          SKEEPER_BIN: ${{ github.workspace }}/bin/skeeper
+        run: |
+          set -euo pipefail
+
+          lab="$(mktemp -d)"
+          remote="${lab}/sidecar.git"
+          project="${lab}/project"
+          git init --bare --initial-branch=main "$remote"
+          git init --initial-branch=main "$project"
+          git -C "$project" config user.name "Skeeper CI"
+          git -C "$project" config user.email "skeeper-ci@example.com"
+          cat > "${project}/.skeeper.yml" <<YAML
+          sidecar: ${remote}
+          namespaces:
+            - name: project
+              patterns:
+                - "**/SPEC.md"
+          YAML
+          mkdir -p "${project}/src/auth"
+          printf '# Auth spec\n' > "${project}/src/auth/SPEC.md"
+          git -C "$project" add .skeeper.yml src/auth/SPEC.md
+          git -C "$project" commit -m "bootstrap specs"
+          (
+            cd "$project"
+            "$SKEEPER_BIN" sync --force
+          )
+          git -C "$project" add .gitignore .gitattributes skeeper.lock
+          git -C "$project" commit -m "sync skeeper lock"
+          echo "project=$project" >> "$GITHUB_OUTPUT"
+        working-directory: ${{ github.workspace }}
+
+      - name: Run local action against hermetic sidecar
+        uses: ./
+        with:
+          binary: ${{ github.workspace }}/bin/skeeper
+          working-directory: ${{ steps.fixture.outputs.project }}
+          args: |
+            verify
+            --json

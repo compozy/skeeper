@@ -2,15 +2,19 @@ package sidecar_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/compozy/skeeper/internal/config"
 	"github.com/compozy/skeeper/internal/gitexec"
+	"github.com/compozy/skeeper/internal/lockfile"
 	"github.com/compozy/skeeper/internal/sidecar"
+	"github.com/compozy/skeeper/internal/state"
 )
 
 func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
@@ -48,20 +52,34 @@ func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("log: %v", err)
 	}
-	if !strings.Contains(logOutput, "sync ") || !strings.Contains(logOutput, "bootstrap") {
+	if !strings.Contains(logOutput, "sync namespace project") {
 		t.Fatalf("expected sync history, got %q", logOutput)
 	}
+	latestLog, err := service.Log(ctx, root, "src/auth/SPEC.md", sidecar.LogOptions{Latest: true})
+	if err != nil {
+		t.Fatalf("latest log: %v", err)
+	}
+	for _, want := range []string{"latest:", "locked:", "state: up-to-date"} {
+		if !strings.Contains(latestLog, want) {
+			t.Fatalf("latest log missing %q:\n%s", want, latestLog)
+		}
+	}
 	fullCommit := gitOutput(t, filepath.Join(root, sidecar.DirName), "log", "-1", "--format=%B")
-	mainSHA := gitOutput(t, root, "rev-parse", "HEAD")
-	if !strings.Contains(fullCommit, "Main-Commit: "+mainSHA) {
-		t.Fatalf("expected main commit metadata in sidecar commit:\n%s", fullCommit)
+	if strings.Contains(fullCommit, "Main-Commit:") {
+		t.Fatalf("sidecar commits must not contain legacy Main-Commit trailers:\n%s", fullCommit)
+	}
+	if !strings.Contains(fullCommit, "Namespace-Digest: sha256:") {
+		t.Fatalf("expected namespace digest metadata in sidecar commit:\n%s", fullCommit)
+	}
+	if _, err := os.Stat(filepath.Join(root, "skeeper.lock")); err != nil {
+		t.Fatalf("expected skeeper.lock to be written: %v", err)
 	}
 
 	status, err := service.Status(ctx, root)
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if status.Sidecar != remote || status.Branch != "main" || len(status.Namespaces) != 1 || status.PendingSync != 0 {
+	if status.Sidecar != remote || status.Branch != "main" || len(status.Namespaces) != 1 {
 		t.Fatalf("unexpected status: %#v", status)
 	}
 	if status.Namespaces[0].TrackedFiles != 1 {
@@ -69,6 +87,9 @@ func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
 	}
 	if status.Namespaces[0].LastCommit == "" {
 		t.Fatal("expected last sidecar commit in status")
+	}
+	if status.Namespaces[0].LockedCommit == "" {
+		t.Fatal("expected locked sidecar commit in status")
 	}
 
 	if err := os.RemoveAll(filepath.Join(root, sidecar.DirName)); err != nil {
@@ -89,6 +110,329 @@ func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
 	statusOutput := gitOutput(t, root, "status", "--short", "--ignored", "src/auth/SPEC.md")
 	if !strings.Contains(statusOutput, "!! src/auth/SPEC.md") {
 		t.Fatalf("expected main repo to ignore spec file, got %q", statusOutput)
+	}
+}
+
+func TestServiceVerifyAndFSCKUseLockfile(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	verify, err := service.Verify(ctx, root, sidecar.VerifyOptions{})
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !verify.OK {
+		t.Fatalf("expected verify ok: %#v", verify)
+	}
+	fsck, err := service.FSCK(ctx, root, sidecar.FSCKOptions{})
+	if err != nil {
+		t.Fatalf("fsck: %v", err)
+	}
+	if !fsck.OK {
+		t.Fatalf("expected fsck ok: %#v", fsck)
+	}
+
+	writeFile(t, root, "src/auth/SPEC.md", "# Drift\n")
+	fsck, err = service.FSCK(ctx, root, sidecar.FSCKOptions{})
+	if err != nil {
+		t.Fatalf("fsck drift: %v", err)
+	}
+	if fsck.OK || len(fsck.Diagnostics) == 0 || fsck.Diagnostics[0].Code != "fsck.working_tree_drift" {
+		t.Fatalf("expected fsck drift diagnostic: %#v", fsck)
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "skeeper.lock"))
+	if err != nil {
+		t.Fatalf("read lock: %v", err)
+	}
+	const badDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	lockText := string(data)
+	digestOffset := strings.Index(lockText, "sha256:")
+	if digestOffset == -1 {
+		t.Fatalf("lock missing digest:\n%s", lockText)
+	}
+	tampered := lockText[:digestOffset] + badDigest + lockText[digestOffset+len(badDigest):]
+	if err := os.WriteFile(filepath.Join(root, "skeeper.lock"), []byte(tampered), 0o644); err != nil {
+		t.Fatalf("tamper lock: %v", err)
+	}
+	verify, err = service.Verify(ctx, root, sidecar.VerifyOptions{})
+	if err != nil {
+		t.Fatalf("verify tampered: %v", err)
+	}
+	if verify.OK || len(verify.Diagnostics) == 0 || verify.Diagnostics[0].Code != "lock.digest_mismatch" {
+		t.Fatalf("expected verify mismatch diagnostic: %#v", verify)
+	}
+}
+
+func TestServiceVerifyHookDoesNotCreateMissingSidecarClone(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, sidecar.DirName)); err != nil {
+		t.Fatalf("remove sidecar clone: %v", err)
+	}
+
+	verify, err := service.Verify(ctx, root, sidecar.VerifyOptions{Hook: true})
+	if err != nil {
+		t.Fatalf("verify hook: %v", err)
+	}
+	if verify.OK || len(verify.Diagnostics) == 0 || verify.Diagnostics[0].Code != "lock.clone_missing" {
+		t.Fatalf("expected clone-missing diagnostic: %#v", verify)
+	}
+	if _, err := os.Stat(filepath.Join(root, sidecar.DirName)); !os.IsNotExist(err) {
+		t.Fatalf("verify hook must not create sidecar clone, stat err=%v", err)
+	}
+}
+
+func TestServiceAdoptPushesSidecarBeforeRemovingMainIndexTracking(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	writeFile(t, root, "README.md", "project\n")
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+	git(t, root, "add", "README.md", config.Filename, "src/auth/SPEC.md")
+	git(t, root, "commit", "-m", "bootstrap tracked spec")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	result, err := service.Adopt(ctx, root, []string{"src/auth/SPEC.md"}, sidecar.MutateOptions{})
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if len(result.Changed) != 1 || result.Changed[0].Path != "src/auth/SPEC.md" {
+		t.Fatalf("unexpected adopt result: %#v", result)
+	}
+	if out := gitOutput(t, root, "ls-files", "--", "src/auth/SPEC.md"); out != "" {
+		t.Fatalf("expected spec removed from main index, got %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(root, "src/auth/SPEC.md")); err != nil {
+		t.Fatalf("expected working file to remain: %v", err)
+	}
+	assertSidecarFile(t, remote, "project/__branches__/main", "project/src/auth/SPEC.md", "# Auth\n")
+}
+
+func TestServicePatternAddUpdatesConfigAndGitignore(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"docs/specs/**"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	result, err := service.PatternAdd(ctx, root, "src/**/SPEC.md", sidecar.PatternAddOptions{})
+	if err != nil {
+		t.Fatalf("pattern add: %v", err)
+	}
+	if result.ConfigPath == "" || result.Gitignore == "" {
+		t.Fatalf("unexpected pattern result: %#v", result)
+	}
+	reloaded, err := config.Load(root)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if !slices.Contains(reloaded.Namespaces[0].Patterns, "src/**/SPEC.md") {
+		t.Fatalf("expected config to include added pattern: %#v", reloaded.Namespaces[0].Patterns)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read gitignore: %v", err)
+	}
+	if !strings.Contains(string(data), "src/**/SPEC.md") {
+		t.Fatalf("expected gitignore to include added pattern:\n%s", string(data))
+	}
+}
+
+func TestServiceMergeDriverWritesCanonicalLockToCurrentPath(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	rootLock := readFile(t, filepath.Join(root, "skeeper.lock"))
+	writeFile(t, root, "merge/base.lock", rootLock)
+	writeFile(t, root, "merge/current.lock", rootLock)
+	writeFile(t, root, "merge/other.lock", rootLock)
+
+	result, err := service.MergeDriver(ctx, root, sidecar.MergeDriverOptions{
+		BasePath:    "merge/base.lock",
+		CurrentPath: "merge/current.lock",
+		OtherPath:   "merge/other.lock",
+	})
+	if err != nil {
+		t.Fatalf("merge driver: %v", err)
+	}
+	if !samePath(t, result.OutputPath, filepath.Join(root, "merge/current.lock")) {
+		t.Fatalf("unexpected merge output path: %#v", result)
+	}
+	current := readFile(t, filepath.Join(root, "merge/current.lock"))
+	if !strings.Contains(current, `"version": 1`) || strings.Contains(current, "<<<<<<<") {
+		t.Fatalf("merge driver did not write canonical lock:\n%s", current)
+	}
+	if current != rootLock {
+		t.Fatalf("merge output must match canonical root lock")
+	}
+}
+
+func TestServiceMergeDriverMarksChangedLockPending(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	rootLock := readFile(t, filepath.Join(root, "skeeper.lock"))
+	writeFile(t, root, "merge/current.lock", rootLock)
+	writeFile(t, root, "src/auth/SPEC.md", "# Merged\n")
+
+	if _, err := service.MergeDriver(ctx, root, sidecar.MergeDriverOptions{
+		CurrentPath: "merge/current.lock",
+	}); err != nil {
+		t.Fatalf("merge driver: %v", err)
+	}
+	data := readFile(t, filepath.Join(root, "merge/current.lock"))
+	var merged lockfile.Lock
+	if err := json.Unmarshal([]byte(data), &merged); err != nil {
+		t.Fatalf("decode merge output: %v", err)
+	}
+	if len(merged.Namespaces) != 1 || merged.Namespaces[0].Commit != "0000000000000000000000000000000000000000" {
+		t.Fatalf("expected pending commit marker, got %#v", merged.Namespaces)
+	}
+	if err := lockfile.Validate(merged); err == nil {
+		t.Fatal("expected pending merge-driver lock to fail validation before hook sync")
+	}
+}
+
+func TestServiceRecordBypassUsesConfiguredEnvName(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	cfg := singleNamespaceConfig(newBareRepo(t), "project", []string{"**/SPEC.md"})
+	cfg.Settings.Hooks.AllowSkipEnv = "MY_SKIP"
+	bootstrapRepo(t, root, cfg)
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if err := service.RecordBypass(ctx, root, "custom bypass"); err != nil {
+		t.Fatalf("record bypass: %v", err)
+	}
+	repair, err := service.RepairStatus(ctx, root)
+	if err != nil {
+		t.Fatalf("repair status: %v", err)
+	}
+	if repair.Bypass == nil || repair.Bypass.Env != "MY_SKIP" {
+		t.Fatalf("expected configured bypass env, got %#v", repair.Bypass)
+	}
+}
+
+func TestServiceHookSyncUsesStagedContentForAmend(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	writeFile(t, root, "src/auth/SPEC.md", "# Initial\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	git(t, root, "add", "skeeper.lock")
+	git(t, root, "commit", "-m", "sync initial lock")
+
+	writeFile(t, root, "src/auth/SPEC.md", "# Amended staged\n")
+	git(t, root, "add", "-f", "src/auth/SPEC.md")
+	writeFile(t, root, "src/auth/SPEC.md", "# Unstaged worktree\n")
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{Hook: true}); err != nil {
+		t.Fatalf("hook sync: %v", err)
+	}
+	git(t, root, "add", "skeeper.lock")
+	git(t, root, "commit", "--amend", "--no-edit")
+
+	assertSidecarFile(t, remote, "project/__branches__/main", "project/src/auth/SPEC.md", "# Amended staged\n")
+	if !strings.Contains(gitOutput(t, root, "show", "HEAD:skeeper.lock"), `"version": 1`) {
+		t.Fatal("amended commit missing updated skeeper.lock")
+	}
+}
+
+func TestServiceLockVerifiesAfterRebaseReplay(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	service := sidecar.New(&gitexec.ExecRunner{})
+
+	writeFile(t, root, "src/auth/SPEC.md", "# Initial\n")
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	git(t, root, "add", "skeeper.lock")
+	git(t, root, "commit", "-m", "sync initial lock")
+
+	git(t, root, "switch", "-c", "feature/spec-update")
+	writeFile(t, root, "src/auth/SPEC.md", "# Feature update\n")
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("feature sync: %v", err)
+	}
+	git(t, root, "add", "skeeper.lock")
+	git(t, root, "commit", "-m", "sync feature lock")
+
+	git(t, root, "switch", "main")
+	writeFile(t, root, "README.md", "project\n\nmain change\n")
+	git(t, root, "add", "README.md")
+	git(t, root, "commit", "-m", "main change")
+	git(t, root, "switch", "feature/spec-update")
+	git(t, root, "rebase", "main")
+
+	verify, err := service.Verify(ctx, root, sidecar.VerifyOptions{})
+	if err != nil {
+		t.Fatalf("verify after rebase: %v", err)
+	}
+	if !verify.OK {
+		t.Fatalf("expected rebased lock to verify: %#v", verify)
 	}
 }
 
@@ -171,7 +515,7 @@ func TestServiceSyncUsesMultipleNamespacesAndSidecarBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("log repo A: %v", err)
 	}
-	if !strings.Contains(logOutput, "bootstrap") {
+	if !strings.Contains(logOutput, "sync namespace repo") {
 		t.Fatalf("expected repo A sidecar history, got %q", logOutput)
 	}
 
@@ -252,7 +596,7 @@ func TestServiceSyncMovesFileWhenNamespaceExcludeChangesOwnership(t *testing.T) 
 	assertSidecarFile(t, remote, "skills/__branches__/main", "skills/skills/review.md", "# Skill\n")
 }
 
-func TestServiceSyncCleansSidecarWorktreeBetweenNamespacesAfterQueuedPush(t *testing.T) {
+func TestServiceSyncRequiresRepairAfterFailedPushBeforeRetry(t *testing.T) {
 	setGitIdentity(t)
 
 	ctx := context.Background()
@@ -279,8 +623,18 @@ func TestServiceSyncCleansSidecarWorktreeBetweenNamespacesAfterQueuedPush(t *tes
 	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err == nil {
 		t.Fatal("expected sync to fail while pushing repo namespace")
 	}
+	repair, err := service.RepairStatus(ctx, root)
+	if err != nil {
+		t.Fatalf("repair status: %v", err)
+	}
+	if repair.Transaction == nil {
+		t.Fatal("expected failed sync to leave a transaction journal")
+	}
 
 	git(t, sidecarDir, "remote", "set-url", "origin", remote)
+	if err := service.RepairAbort(ctx, root); err != nil {
+		t.Fatalf("repair abort: %v", err)
+	}
 	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
 		t.Fatalf("retry sync: %v", err)
 	}
@@ -289,7 +643,33 @@ func TestServiceSyncCleansSidecarWorktreeBetweenNamespacesAfterQueuedPush(t *tes
 	assertSidecarMissing(t, remote, "skills/__branches__/main", "repo/docs/SPEC.md")
 }
 
-func TestServiceHookSyncQueuesNamespaceSpecificFailure(t *testing.T) {
+func TestServiceRepairResumeRejectsConfigDrift(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "repo", []string{"docs/*.md"}))
+	writeFile(t, root, "docs/current.md", "# Current\n")
+
+	store := state.New(filepath.Join(root, ".git", "skeeper"))
+	if err := store.Begin(ctx, state.Transaction{
+		ID:         "tx-1",
+		Kind:       "sync",
+		Root:       root,
+		Namespaces: []string{"repo"},
+		Targets:    []string{"docs/previous.md"},
+	}); err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	_, err := sidecar.New(&gitexec.ExecRunner{}).RepairResume(ctx, root)
+	if err == nil || !strings.Contains(err.Error(), "config no longer matches recorded transaction") {
+		t.Fatalf("expected config drift rejection, got %v", err)
+	}
+}
+
+func TestServiceHookSyncBlocksOnNamespaceSpecificFailure(t *testing.T) {
 	setGitIdentity(t)
 
 	ctx := context.Background()
@@ -311,21 +691,12 @@ func TestServiceHookSyncQueuesNamespaceSpecificFailure(t *testing.T) {
 	sidecarDir := filepath.Join(root, sidecar.DirName)
 	git(t, sidecarDir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing.git"))
 	writeFile(t, root, "docs/SPEC.md", "# Repo\n")
-	result, err := service.Sync(ctx, root, sidecar.SyncOptions{Hook: true})
-	if err != nil {
-		t.Fatalf("hook sync must not return an error, got %v", err)
+	_, err := service.Sync(ctx, root, sidecar.SyncOptions{Hook: true})
+	if err == nil {
+		t.Fatal("expected strict hook sync to fail")
 	}
-	if !result.Queued {
-		t.Fatal("expected failed hook sync to be queued")
-	}
-	queuePath := filepath.Join(root, ".git", "skeeper", "queue.json")
-	data, err := os.ReadFile(queuePath)
-	if err != nil {
-		t.Fatalf("read queue: %v", err)
-	}
-	queue := string(data)
-	if !strings.Contains(queue, `"namespace": "repo"`) || !strings.Contains(queue, "push sidecar branch") {
-		t.Fatalf("expected namespace-specific push failure in queue, got %s", queue)
+	if !strings.Contains(err.Error(), "repo") || !strings.Contains(err.Error(), "fetch sidecar origin") {
+		t.Fatalf("expected namespace-specific strict failure, got %v", err)
 	}
 }
 
@@ -450,7 +821,7 @@ func TestServiceStatusReportsRemoteState(t *testing.T) {
 	}
 }
 
-func TestServiceHookSyncQueuesFailureWithoutReturningError(t *testing.T) {
+func TestServiceHookSyncReturnsCloneFailure(t *testing.T) {
 	root := newMainRepo(t)
 	cfg := singleNamespaceConfig(filepath.Join(t.TempDir(), "missing.git"), "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
@@ -458,20 +829,12 @@ func TestServiceHookSyncQueuesFailureWithoutReturningError(t *testing.T) {
 	}
 
 	service := sidecar.New(&gitexec.ExecRunner{})
-	result, err := service.Sync(context.Background(), root, sidecar.SyncOptions{Hook: true})
-	if err != nil {
-		t.Fatalf("hook sync must not return an error, got %v", err)
+	_, err := service.Sync(context.Background(), root, sidecar.SyncOptions{Hook: true})
+	if err == nil {
+		t.Fatal("expected strict hook sync to fail")
 	}
-	if !result.Queued {
-		t.Fatal("expected failed hook sync to be queued")
-	}
-	queuePath := filepath.Join(root, ".git", "skeeper", "queue.json")
-	data, err := os.ReadFile(queuePath)
-	if err != nil {
-		t.Fatalf("read queue: %v", err)
-	}
-	if !strings.Contains(string(data), "clone sidecar") {
-		t.Fatalf("expected clone failure reason in queue, got %s", string(data))
+	if !strings.Contains(err.Error(), "clone sidecar") {
+		t.Fatalf("expected clone failure, got %v", err)
 	}
 }
 
@@ -512,7 +875,7 @@ func assertSidecarMissing(t *testing.T, remote, branch, path string) {
 	}
 }
 
-func TestServiceHookSyncReportsQueueWriteFailureWithoutReturningError(t *testing.T) {
+func TestServiceHookSyncReportsStateWriteFailure(t *testing.T) {
 	root := newMainRepo(t)
 	cfg := singleNamespaceConfig(filepath.Join(t.TempDir(), "missing.git"), "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
@@ -523,15 +886,12 @@ func TestServiceHookSyncReportsQueueWriteFailureWithoutReturningError(t *testing
 	}
 
 	service := sidecar.New(&gitexec.ExecRunner{})
-	result, err := service.Sync(context.Background(), root, sidecar.SyncOptions{Hook: true})
-	if err != nil {
-		t.Fatalf("hook sync must not return an error, got %v", err)
+	_, err := service.Sync(context.Background(), root, sidecar.SyncOptions{Hook: true})
+	if err == nil {
+		t.Fatal("expected strict hook sync to return state error")
 	}
-	if !result.QueueFailed {
-		t.Fatalf("expected queue failure to be reported, got %#v", result)
-	}
-	if result.QueueError == "" {
-		t.Fatal("expected queue failure error message")
+	if !strings.Contains(err.Error(), "transaction") && !strings.Contains(err.Error(), "skeeper") {
+		t.Fatalf("expected state failure, got %v", err)
 	}
 }
 
@@ -576,7 +936,7 @@ func TestServiceInitUsesExistingCompatibleConfigIdempotently(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, sidecar.DirName, ".git")); err != nil {
 		t.Fatalf("expected sidecar clone to exist: %v", err)
 	}
-	hook, err := os.ReadFile(filepath.Join(root, ".git", "hooks", "post-commit"))
+	hook, err := os.ReadFile(filepath.Join(root, ".git", "hooks", "pre-commit"))
 	if err != nil {
 		t.Fatalf("read hook: %v", err)
 	}
@@ -666,7 +1026,7 @@ func TestServiceInitRejectsIncompatibleExistingConfig(t *testing.T) {
 	}
 }
 
-func TestServiceStatusAndLogRequireExistingSidecarClone(t *testing.T) {
+func TestServiceStatusDoesNotRequireCloneAndLogClones(t *testing.T) {
 	root := newMainRepo(t)
 	cfg := singleNamespaceConfig(filepath.Join(t.TempDir(), "sidecar.git"), "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
@@ -674,16 +1034,16 @@ func TestServiceStatusAndLogRequireExistingSidecarClone(t *testing.T) {
 	}
 
 	service := sidecar.New(&gitexec.ExecRunner{})
-	if _, err := service.Status(context.Background(), root); err == nil || !strings.Contains(err.Error(), "hydrate") {
-		t.Fatalf("expected status to require hydrate, got %v", err)
+	if _, err := service.Status(context.Background(), root); err != nil {
+		t.Fatalf("status should report config state without sidecar clone: %v", err)
 	}
 	if _, err := service.Log(
 		context.Background(),
 		root,
 		"src/auth/SPEC.md",
 	); err == nil ||
-		!strings.Contains(err.Error(), "hydrate") {
-		t.Fatalf("expected log to require hydrate, got %v", err)
+		!strings.Contains(err.Error(), "clone sidecar") {
+		t.Fatalf("expected log to attempt sidecar clone, got %v", err)
 	}
 }
 
@@ -812,13 +1172,32 @@ func writeFile(t *testing.T, root, rel, content string) {
 
 func assertFile(t *testing.T, path, want string) {
 	t.Helper()
+	data := readFile(t, path)
+	if data != want {
+		t.Fatalf("file %s mismatch: got %q want %q", path, data, want)
+	}
+}
+
+func samePath(t *testing.T, left, right string) bool {
+	t.Helper()
+	leftEval, err := filepath.EvalSymlinks(left)
+	if err != nil {
+		t.Fatalf("eval %s: %v", left, err)
+	}
+	rightEval, err := filepath.EvalSymlinks(right)
+	if err != nil {
+		t.Fatalf("eval %s: %v", right, err)
+	}
+	return leftEval == rightEval
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	if string(data) != want {
-		t.Fatalf("file %s mismatch: got %q want %q", path, string(data), want)
-	}
+	return string(data)
 }
 
 func sameStrings(left, right []string) bool {

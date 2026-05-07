@@ -1,9 +1,11 @@
 package gitexec
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -82,7 +84,20 @@ func (g *Git) CurrentBranch(ctx context.Context, root string) (string, error) {
 	}
 	ref, err := repo.Head()
 	if err != nil {
-		return "", fmt.Errorf("read current branch: %w", err)
+		cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--quiet", "--short", "HEAD")
+		cmd.Dir = root
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if shellErr := cmd.Run(); shellErr != nil {
+			return "", fmt.Errorf("read current branch: %w", err)
+		}
+		branch := strings.TrimSpace(stdout.String())
+		if branch == "" {
+			return "", fmt.Errorf("read current branch: %w", err)
+		}
+		return branch, nil
 	}
 	if !ref.Name().IsBranch() {
 		return "", errors.New("current git checkout is detached; skeeper requires a branch")
@@ -199,47 +214,6 @@ func (g *Git) IsDirty(ctx context.Context, dir string) (bool, error) {
 		return false, err
 	}
 	return !status.IsClean(), nil
-}
-
-// AddAll stages all worktree changes.
-func (g *Git) AddAll(ctx context.Context, dir string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	repo, err := openRepository(dir)
-	if err != nil {
-		return err
-	}
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return err
-	}
-	if err := worktree.AddWithOptions(&gogit.AddOptions{All: true}); err != nil {
-		return fmt.Errorf("stage all changes: %w", err)
-	}
-	return nil
-}
-
-// ResetAndClean restores the current HEAD worktree and removes untracked files.
-func (g *Git) ResetAndClean(ctx context.Context, dir string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	repo, err := openRepository(dir)
-	if err != nil {
-		return err
-	}
-	worktree, err := repo.Worktree()
-	if err != nil {
-		return err
-	}
-	if err := worktree.Reset(&gogit.ResetOptions{Mode: gogit.HardReset}); err != nil {
-		return fmt.Errorf("restore worktree to HEAD: %w", err)
-	}
-	if err := worktree.Clean(&gogit.CleanOptions{Dir: true}); err != nil {
-		return fmt.Errorf("remove untracked worktree files: %w", err)
-	}
-	return nil
 }
 
 // AheadBehind counts commits reachable from left but not right, and right but not left.

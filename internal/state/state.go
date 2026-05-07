@@ -2,6 +2,7 @@
 package state
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,19 +11,55 @@ import (
 )
 
 const (
-	queueFile = "queue.json"
-	logFile   = "sync.log"
+	transactionFile = "transaction.json"
+	bypassFile      = "bypass.json"
 )
 
-// Entry records a queued sync retry.
-type Entry struct {
-	Time      time.Time `json:"time"`
-	Reason    string    `json:"reason"`
-	MainSHA   string    `json:"main_sha"`
-	Namespace string    `json:"namespace,omitempty"`
+// TransactionPhase identifies a durable mutating operation phase.
+type TransactionPhase string
+
+const (
+	// TransactionPhasePlanned records a plan before side effects.
+	TransactionPhasePlanned TransactionPhase = "planned"
+	// TransactionPhaseSidecarPushed records that sidecar content is durable remotely.
+	TransactionPhaseSidecarPushed TransactionPhase = "sidecar_pushed"
+	// TransactionPhaseMainIndexMutated records that the main Git index was mutated.
+	TransactionPhaseMainIndexMutated TransactionPhase = "main_index_mutated"
+	// TransactionPhaseLockStaged records that skeeper.lock was written and staged.
+	TransactionPhaseLockStaged TransactionPhase = "lock_staged"
+)
+
+// Transaction records a resumable multi-step operation.
+type Transaction struct {
+	ID               string           `json:"id"`
+	Kind             string           `json:"kind"`
+	Phase            TransactionPhase `json:"phase"`
+	Root             string           `json:"root"`
+	Targets          []string         `json:"targets,omitempty"`
+	Namespaces       []string         `json:"namespaces,omitempty"`
+	MainIndexMutated bool             `json:"main_index_mutated"`
+	CreatedAt        time.Time        `json:"created_at"`
+	UpdatedAt        time.Time        `json:"updated_at"`
 }
 
-// Store manages queue and log files under .git/skeeper.
+// Bypass records an audited strict-hook bypass.
+type Bypass struct {
+	Time    time.Time `json:"time"`
+	Env     string    `json:"env"`
+	MainSHA string    `json:"main_sha"`
+	Reason  string    `json:"reason"`
+}
+
+// TransactionStore persists active transaction state.
+type TransactionStore interface {
+	Begin(ctx context.Context, tx Transaction) error
+	Current(ctx context.Context) (Transaction, bool, error)
+	MarkPhase(ctx context.Context, id string, phase TransactionPhase) error
+	Complete(ctx context.Context, id string) error
+	Abort(ctx context.Context, id string) error
+}
+
+// Store manages local transaction and bypass journals under .git/skeeper.
 type Store struct {
 	dir string
 }
@@ -32,60 +69,184 @@ func New(dir string) *Store {
 	return &Store{dir: dir}
 }
 
-// Enqueue appends a retry entry.
-func (s *Store) Enqueue(entry Entry) error {
-	entries, err := s.Queue()
-	if err != nil {
+var _ TransactionStore = (*Store)(nil)
+
+// Begin stores a new active transaction and rejects concurrent transactions.
+func (s *Store) Begin(ctx context.Context, tx Transaction) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	entries = append(entries, entry)
-	if err := s.ensureDir(); err != nil {
+	if current, ok, err := s.Current(ctx); err != nil {
 		return err
+	} else if ok {
+		return fmt.Errorf(
+			"transaction %s already active in phase %s; run `skeeper repair status`",
+			current.ID,
+			current.Phase,
+		)
 	}
-	data, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode sync queue: %w", err)
+	if tx.ID == "" {
+		tx.ID = fmt.Sprintf("%d", time.Now().UTC().UnixNano())
 	}
-	if err := atomicWriteFile(filepath.Join(s.dir, queueFile), append(data, '\n'), 0o600); err != nil {
-		return fmt.Errorf("write sync queue: %w", err)
+	now := time.Now().UTC()
+	if tx.CreatedAt.IsZero() {
+		tx.CreatedAt = now
 	}
-	return nil
+	tx.UpdatedAt = now
+	if tx.Phase == "" {
+		tx.Phase = TransactionPhasePlanned
+	}
+	if !tx.Phase.Valid() {
+		return fmt.Errorf("unknown transaction phase %q", tx.Phase)
+	}
+	return s.writeTransaction(tx)
 }
 
-// Queue returns all queued sync entries.
-func (s *Store) Queue() ([]Entry, error) {
-	path := filepath.Join(s.dir, queueFile)
+// Current returns the active transaction if one exists.
+func (s *Store) Current(ctx context.Context) (Transaction, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return Transaction{}, false, err
+	}
+	path := filepath.Join(s.dir, transactionFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return Transaction{}, false, nil
 		}
-		return nil, fmt.Errorf("read sync queue: %w", err)
+		return Transaction{}, false, fmt.Errorf("read transaction journal: %w", err)
 	}
-	var entries []Entry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("decode sync queue: %w", err)
+	var tx Transaction
+	if err := json.Unmarshal(data, &tx); err != nil {
+		return Transaction{}, false, fmt.Errorf("decode transaction journal: %w", err)
 	}
-	return entries, nil
+	return tx, true, nil
 }
 
-// ClearQueue removes queued retries.
-func (s *Store) ClearQueue() error {
-	path := filepath.Join(s.dir, queueFile)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("clear sync queue: %w", err)
+// MarkPhase advances an active transaction phase.
+func (s *Store) MarkPhase(ctx context.Context, id string, phase TransactionPhase) error {
+	if !phase.Valid() {
+		return fmt.Errorf("unknown transaction phase %q", phase)
+	}
+	tx, ok, err := s.Current(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("transaction %s is not active", id)
+	}
+	if tx.ID != id {
+		return fmt.Errorf("active transaction is %s, not %s", tx.ID, id)
+	}
+	tx.Phase = phase
+	tx.UpdatedAt = time.Now().UTC()
+	if phase == TransactionPhaseMainIndexMutated {
+		tx.MainIndexMutated = true
+	}
+	return s.writeTransaction(tx)
+}
+
+// Complete removes a completed transaction.
+func (s *Store) Complete(ctx context.Context, id string) error {
+	tx, ok, err := s.Current(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if tx.ID != id {
+		return fmt.Errorf("active transaction is %s, not %s", tx.ID, id)
+	}
+	return s.removeTransaction()
+}
+
+// Abort removes a transaction before main index mutation.
+func (s *Store) Abort(ctx context.Context, id string) error {
+	tx, ok, err := s.Current(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if tx.ID != id {
+		return fmt.Errorf("active transaction is %s, not %s", tx.ID, id)
+	}
+	if tx.MainIndexMutated {
+		return fmt.Errorf("transaction %s already mutated the main index; inspect files manually", id)
+	}
+	return s.removeTransaction()
+}
+
+// RecordBypass writes the latest audited bypass.
+func (s *Store) RecordBypass(ctx context.Context, bypass Bypass) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.ensureDir(); err != nil {
+		return err
+	}
+	if bypass.Time.IsZero() {
+		bypass.Time = time.Now().UTC()
+	}
+	data, err := json.MarshalIndent(bypass, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode bypass journal: %w", err)
+	}
+	if err := atomicWriteFile(filepath.Join(s.dir, bypassFile), append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write bypass journal: %w", err)
 	}
 	return nil
 }
 
-// AppendLog writes one human-readable sync log line.
-func (s *Store) AppendLog(line string) error {
+// Bypass returns the latest audited bypass if one exists.
+func (s *Store) Bypass(ctx context.Context) (Bypass, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return Bypass{}, false, err
+	}
+	path := filepath.Join(s.dir, bypassFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Bypass{}, false, nil
+		}
+		return Bypass{}, false, fmt.Errorf("read bypass journal: %w", err)
+	}
+	var bypass Bypass
+	if err := json.Unmarshal(data, &bypass); err != nil {
+		return Bypass{}, false, fmt.Errorf("decode bypass journal: %w", err)
+	}
+	return bypass, true, nil
+}
+
+// ClearBypass removes the bypass journal.
+func (s *Store) ClearBypass(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(s.dir, bypassFile)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clear bypass journal: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) writeTransaction(tx Transaction) error {
 	if err := s.ensureDir(); err != nil {
 		return err
 	}
-	entry := time.Now().UTC().Format(time.RFC3339) + " " + line + "\n"
-	if err := appendFile(filepath.Join(s.dir, logFile), []byte(entry)); err != nil {
-		return fmt.Errorf("append sync log: %w", err)
+	data, err := json.MarshalIndent(tx, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode transaction journal: %w", err)
+	}
+	if err := atomicWriteFile(filepath.Join(s.dir, transactionFile), append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write transaction journal: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) removeTransaction() error {
+	if err := os.Remove(filepath.Join(s.dir, transactionFile)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove transaction journal: %w", err)
 	}
 	return nil
 }
@@ -95,26 +256,6 @@ func (s *Store) ensureDir() error {
 		return fmt.Errorf("create skeeper state dir: %w", err)
 	}
 	return nil
-}
-
-func appendFile(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
 }
 
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
@@ -150,4 +291,17 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	}
 	cleanup = false
 	return nil
+}
+
+// Valid reports whether phase is part of the transaction state machine.
+func (p TransactionPhase) Valid() bool {
+	switch p {
+	case TransactionPhasePlanned,
+		TransactionPhaseSidecarPushed,
+		TransactionPhaseMainIndexMutated,
+		TransactionPhaseLockStaged:
+		return true
+	default:
+		return false
+	}
 }

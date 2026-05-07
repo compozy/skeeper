@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
@@ -20,20 +21,48 @@ const (
 	// NamespaceBranchSegment separates a sidecar namespace from branch-specific
 	// sidecar refs.
 	NamespaceBranchSegment = "__branches__"
+	// DefaultGuardrailMaxFiles is the default broad-plan file threshold.
+	DefaultGuardrailMaxFiles = 100
+	// DefaultGuardrailMaxBytes is the default broad-plan byte threshold.
+	DefaultGuardrailMaxBytes int64 = 10_485_760
+	// DefaultPrePushTimeout is the default timeout for the read-only pre-push gate.
+	DefaultPrePushTimeout = 30 * time.Second
+	// DefaultAllowSkipEnv is the audited strict pre-commit bypass variable.
+	DefaultAllowSkipEnv = "SKEEPER_SKIP"
 )
 
 // Config describes how a project mirrors spec files into its sidecar repo.
 type Config struct {
 	Sidecar    string      `yaml:"sidecar"`
 	Bootstrap  string      `yaml:"bootstrap,omitempty"`
+	Settings   Settings    `yaml:"settings,omitempty"`
 	Namespaces []Namespace `yaml:"namespaces"`
+}
+
+// Settings describes operational defaults outside namespace ownership rules.
+type Settings struct {
+	Guardrails GuardrailSettings `yaml:"guardrails,omitempty"`
+	Hooks      HookSettings      `yaml:"hooks,omitempty"`
+}
+
+// GuardrailSettings bounds broad mutating plans.
+type GuardrailSettings struct {
+	MaxFiles int   `yaml:"max_files,omitempty"`
+	MaxBytes int64 `yaml:"max_bytes,omitempty"`
+}
+
+// HookSettings configures managed Git hooks.
+type HookSettings struct {
+	PrePushTimeout string `yaml:"pre_push_timeout,omitempty"`
+	AllowSkipEnv   string `yaml:"allow_skip_env,omitempty"`
 }
 
 // Namespace routes a set of project files into one sidecar namespace.
 type Namespace struct {
-	Name     string   `yaml:"name"`
-	Patterns []string `yaml:"patterns"`
-	Exclude  []string `yaml:"exclude,omitempty"`
+	Name             string   `yaml:"name"`
+	Patterns         []string `yaml:"patterns"`
+	Exclude          []string `yaml:"exclude,omitempty"`
+	RespectGitignore *bool    `yaml:"respect_gitignore,omitempty"`
 }
 
 // DefaultPatterns returns the interactive init defaults.
@@ -76,9 +105,13 @@ func Load(root string) (Config, error) {
 
 // Save writes cfg to .skeeper.yml under root.
 func Save(root string, cfg Config) error {
+	hasExplicitSettings := hasSettings(cfg.Settings)
 	normalized, err := cfg.Normalize()
 	if err != nil {
 		return err
+	}
+	if !hasExplicitSettings {
+		normalized.Settings = Settings{}
 	}
 
 	var buf bytes.Buffer
@@ -96,6 +129,13 @@ func Save(root string, cfg Config) error {
 		return fmt.Errorf("write %s: %w", Filename, err)
 	}
 	return nil
+}
+
+func hasSettings(settings Settings) bool {
+	return settings.Guardrails.MaxFiles != 0 ||
+		settings.Guardrails.MaxBytes != 0 ||
+		settings.Hooks.PrePushTimeout != "" ||
+		settings.Hooks.AllowSkipEnv != ""
 }
 
 func writeFile(path string, data []byte, perm os.FileMode) error {
@@ -122,6 +162,10 @@ func (c Config) Normalize() (Config, error) {
 	if strings.TrimSpace(c.Sidecar) == "" {
 		return Config{}, errors.New("sidecar is required")
 	}
+	settings, err := NormalizeSettings(c.Settings)
+	if err != nil {
+		return Config{}, err
+	}
 	namespaces, err := NormalizeNamespaces(c.Namespaces)
 	if err != nil {
 		return Config{}, err
@@ -129,8 +173,41 @@ func (c Config) Normalize() (Config, error) {
 	if len(namespaces) == 0 {
 		return Config{}, errors.New("namespaces must contain at least one namespace")
 	}
+	c.Settings = settings
 	c.Namespaces = namespaces
 	return c, nil
+}
+
+// NormalizeSettings validates and fills operational defaults.
+func NormalizeSettings(settings Settings) (Settings, error) {
+	if settings.Guardrails.MaxFiles < 0 {
+		return Settings{}, errors.New("settings.guardrails.max_files must be non-negative")
+	}
+	if settings.Guardrails.MaxFiles == 0 {
+		settings.Guardrails.MaxFiles = DefaultGuardrailMaxFiles
+	}
+	if settings.Guardrails.MaxBytes < 0 {
+		return Settings{}, errors.New("settings.guardrails.max_bytes must be non-negative")
+	}
+	if settings.Guardrails.MaxBytes == 0 {
+		settings.Guardrails.MaxBytes = DefaultGuardrailMaxBytes
+	}
+	if strings.TrimSpace(settings.Hooks.PrePushTimeout) == "" {
+		settings.Hooks.PrePushTimeout = DefaultPrePushTimeout.String()
+	}
+	if _, err := time.ParseDuration(settings.Hooks.PrePushTimeout); err != nil {
+		return Settings{}, fmt.Errorf("settings.hooks.pre_push_timeout: %w", err)
+	}
+	if strings.TrimSpace(settings.Hooks.AllowSkipEnv) == "" {
+		settings.Hooks.AllowSkipEnv = DefaultAllowSkipEnv
+	}
+	if !validEnvName(settings.Hooks.AllowSkipEnv) {
+		return Settings{}, fmt.Errorf(
+			"settings.hooks.allow_skip_env %q is not a valid environment variable name",
+			settings.Hooks.AllowSkipEnv,
+		)
+	}
+	return settings, nil
 }
 
 // NormalizeNamespaces validates and canonicalizes namespace routing rules.
@@ -156,11 +233,25 @@ func NormalizeNamespaces(namespaces []Namespace) ([]Namespace, error) {
 		if len(patterns) == 0 {
 			return nil, fmt.Errorf("namespaces[%d].patterns must contain at least one glob", i)
 		}
+		for _, pattern := range patterns {
+			if strings.HasPrefix(pattern, "!") {
+				return nil, fmt.Errorf(
+					"namespaces[%d].patterns rejects negative glob %q; use exclude instead",
+					i,
+					pattern,
+				)
+			}
+		}
 		exclude, err := normalizePatternsField("exclude", namespace.Exclude)
 		if err != nil {
 			return nil, fmt.Errorf("namespaces[%d]: %w", i, err)
 		}
-		normalized = append(normalized, Namespace{Name: name, Patterns: patterns, Exclude: exclude})
+		normalized = append(normalized, Namespace{
+			Name:             name,
+			Patterns:         patterns,
+			Exclude:          exclude,
+			RespectGitignore: normalizeRespectGitignore(namespace.RespectGitignore),
+		})
 	}
 	return normalized, nil
 }
@@ -191,6 +282,14 @@ func normalizePatternsField(field string, patterns []string) ([]string, error) {
 		normalized = append(normalized, cleaned)
 	}
 	return normalized, nil
+}
+
+func normalizeRespectGitignore(value *bool) *bool {
+	if value == nil || *value {
+		return nil
+	}
+	falseValue := false
+	return &falseValue
 }
 
 // CleanNamespace validates a sidecar namespace and returns its canonical
@@ -239,6 +338,11 @@ func (n Namespace) Owns(path string) bool {
 	return n.Includes(path) && !matchesAny(path, n.Exclude)
 }
 
+// RespectsGitignore reports whether Git ignore sources should prune matches.
+func (n Namespace) RespectsGitignore() bool {
+	return n.RespectGitignore == nil || *n.RespectGitignore
+}
+
 // Includes reports whether path matches namespace's include patterns.
 func (n Namespace) Includes(path string) bool {
 	return matchesAny(path, n.Patterns)
@@ -274,6 +378,23 @@ func safeDirectorySegment(segment string) bool {
 		case r >= 'A' && r <= 'Z':
 		case r >= '0' && r <= '9':
 		case r == '-' || r == '_' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9' && i > 0:
+		case r == '_':
 		default:
 			return false
 		}

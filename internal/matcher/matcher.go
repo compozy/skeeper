@@ -25,6 +25,11 @@ var excludedDirs = map[string]struct{}{
 
 const globalExcludesProbeTimeout = time.Second
 
+// Options controls project file discovery.
+type Options struct {
+	RespectGitignore bool
+}
+
 // Find returns sorted slash-separated relative file paths that match patterns.
 func Find(root string, patterns []string) ([]string, error) {
 	return FindContext(context.Background(), root, patterns)
@@ -32,6 +37,12 @@ func Find(root string, patterns []string) ([]string, error) {
 
 // FindContext returns sorted slash-separated relative file paths that match patterns.
 func FindContext(ctx context.Context, root string, patterns []string) ([]string, error) {
+	return FindContextWithOptions(ctx, root, patterns, Options{RespectGitignore: true})
+}
+
+// FindContextWithOptions returns sorted slash-separated relative file paths
+// that match patterns and discovery options.
+func FindContextWithOptions(ctx context.Context, root string, patterns []string, opts Options) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -39,9 +50,12 @@ func FindContext(ctx context.Context, root string, patterns []string) ([]string,
 	if err != nil {
 		return nil, err
 	}
-	ignored, err := newIgnoredMatcher(ctx, root)
-	if err != nil {
-		return nil, err
+	var ignored *gitignore.Matcher
+	if opts.RespectGitignore {
+		ignored, err = newIgnoredMatcher(ctx, root)
+		if err != nil {
+			return nil, err
+		}
 	}
 	seen := make(map[string]struct{})
 
@@ -61,13 +75,15 @@ func FindContext(ctx context.Context, root string, patterns []string) ([]string,
 		}
 		rel = filepath.ToSlash(filepath.Clean(rel))
 		if entry.IsDir() {
-			if excluded(rel) || ignored.MatchPath(rel, true) {
+			if excluded(rel) || ignoredPath(ignored, rel, true) {
 				return filepath.SkipDir
 			}
-			loadNestedIgnore(root, rel, ignored)
+			if ignored != nil {
+				loadNestedIgnore(root, rel, ignored)
+			}
 			return nil
 		}
-		if excluded(rel) || ignored.MatchPath(rel, false) {
+		if excluded(rel) || ignoredPath(ignored, rel, false) {
 			return nil
 		}
 		if matchesAny(rel, normalized) {
@@ -84,6 +100,10 @@ func FindContext(ctx context.Context, root string, patterns []string) ([]string,
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+func ignoredPath(ignored *gitignore.Matcher, rel string, isDir bool) bool {
+	return ignored != nil && ignored.MatchPath(rel, isDir)
 }
 
 func newIgnoredMatcher(ctx context.Context, root string) (*gitignore.Matcher, error) {
