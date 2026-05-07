@@ -1,6 +1,7 @@
 <div align="center">
-  <h1>skeeper</h1>
-  <p><strong>Version your spec artifacts — PRDs, tech specs, ADRs, AI plans — in a sidecar Git repository, without polluting your main PRs.</strong></p>
+  <p>
+    <img src="docs/assets/skeeper-readme-hero.png" alt="skeeper hero showing AI specs syncing into a sidecar Git repository" width="100%">
+  </p>
   <p>
     <a href="https://github.com/compozy/skeeper/actions/workflows/ci.yml">
       <img src="https://github.com/compozy/skeeper/actions/workflows/ci.yml/badge.svg" alt="CI">
