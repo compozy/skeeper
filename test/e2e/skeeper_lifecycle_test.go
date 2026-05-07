@@ -24,7 +24,7 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 		"--patterns", "**/SPEC.md",
 	)
 	env.assertContainsFile(filepath.Join(project, ".skeeper.yml"), "bootstrap: brew install")
-	env.assertContainsFile(filepath.Join(project, ".skeeper.yml"), "directory: project")
+	env.assertContainsFile(filepath.Join(project, ".skeeper.yml"), "name: project")
 	env.assertContainsFile(filepath.Join(project, ".gitignore"), ".skeeper/")
 	env.assertContainsFile(filepath.Join(project, ".gitignore"), "**/SPEC.md")
 	env.assertContainsFile(filepath.Join(project, ".git", "hooks", "post-commit"), "skeeper sync --hook")
@@ -58,7 +58,7 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 	env.assertSidecarMissing("project/__branches__/main", "project/src/auth/service.go")
 
 	statusOut := env.run(project, "skeeper", "status")
-	env.assertOutputContains(statusOut, "directory: project")
+	env.assertOutputContains(statusOut, "namespace: project")
 	env.assertOutputContains(statusOut, "sidecar branch: project/__branches__/main")
 	env.assertOutputContains(statusOut, "pending sync:  0")
 	env.assertOutputContains(statusOut, "tracked files: 1")
@@ -72,7 +72,7 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 	env.assertContainsFile(filepath.Join(fresh, ".git", "hooks", "post-commit"), "skeeper sync --hook")
 }
 
-func TestSkeeperSharedSidecarDirectoryIsolationAcrossRepos(t *testing.T) {
+func TestSkeeperSharedSidecarNamespaceIsolationAcrossRepos(t *testing.T) {
 	env := newE2EEnv(t)
 	sharedRemote := env.newBareRepo("shared-specs.git")
 	alpha := env.newMainRepo("alpha")
@@ -80,16 +80,16 @@ func TestSkeeperSharedSidecarDirectoryIsolationAcrossRepos(t *testing.T) {
 
 	env.run(alpha, "skeeper", "init",
 		"--sidecar", sharedRemote,
-		"--directory", "alpha",
+		"--namespace", "alpha",
 		"--patterns", "**/SPEC.md",
 	)
 	env.run(beta, "skeeper", "init",
 		"--sidecar", sharedRemote,
-		"--directory", "beta",
+		"--namespace", "beta",
 		"--patterns", "**/SPEC.md",
 	)
-	env.assertContainsFile(filepath.Join(alpha, ".skeeper.yml"), "directory: alpha")
-	env.assertContainsFile(filepath.Join(beta, ".skeeper.yml"), "directory: beta")
+	env.assertContainsFile(filepath.Join(alpha, ".skeeper.yml"), "name: alpha")
+	env.assertContainsFile(filepath.Join(beta, ".skeeper.yml"), "name: beta")
 
 	env.writeFile(alpha, "README.md", "# alpha\n")
 	env.git(alpha, "add", "README.md", ".skeeper.yml", ".gitignore")
@@ -124,7 +124,7 @@ func TestSkeeperSharedSidecarDirectoryIsolationAcrossRepos(t *testing.T) {
 	env.assertSidecarFileFromRemote(sharedRemote, "beta/__branches__/main", "beta/src/billing/SPEC.md", "# Beta spec\n")
 
 	statusOut := env.run(beta, "skeeper", "status")
-	env.assertOutputContains(statusOut, "directory: beta")
+	env.assertOutputContains(statusOut, "namespace: beta")
 	env.assertOutputContains(statusOut, "sidecar branch: beta/__branches__/main")
 
 	if err := os.RemoveAll(filepath.Join(beta, ".skeeper")); err != nil {

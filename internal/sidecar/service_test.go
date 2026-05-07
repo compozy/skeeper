@@ -19,14 +19,11 @@ func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
 	ctx := context.Background()
 	root := newMainRepo(t)
 	remote := newBareRepo(t)
-	cfg := config.Config{
-		Sidecar:  remote,
-		Patterns: []string{"**/SPEC.md"},
-	}
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	if err := sidecar.UpdateGitignore(root, cfg.Patterns); err != nil {
+	if err := sidecar.UpdateGitignore(root, cfg.Namespaces); err != nil {
 		t.Fatalf("update gitignore: %v", err)
 	}
 	writeFile(t, root, "README.md", "project\n")
@@ -45,7 +42,7 @@ func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
 	if result.ChangedFiles != 1 {
 		t.Fatalf("expected 1 changed file, got %d", result.ChangedFiles)
 	}
-	assertFile(t, filepath.Join(root, sidecar.DirName, "src/auth/SPEC.md"), "# Auth\n")
+	assertFile(t, filepath.Join(root, sidecar.DirName, "project/src/auth/SPEC.md"), "# Auth\n")
 
 	logOutput, err := service.Log(ctx, root, "src/auth/SPEC.md")
 	if err != nil {
@@ -64,10 +61,13 @@ func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if status.Sidecar != remote || status.Branch != "main" || status.TrackedFiles != 1 || status.PendingSync != 0 {
+	if status.Sidecar != remote || status.Branch != "main" || len(status.Namespaces) != 1 || status.PendingSync != 0 {
 		t.Fatalf("unexpected status: %#v", status)
 	}
-	if status.LastCommit == "" {
+	if status.Namespaces[0].TrackedFiles != 1 {
+		t.Fatalf("expected 1 tracked file, got %#v", status.Namespaces[0])
+	}
+	if status.Namespaces[0].LastCommit == "" {
 		t.Fatal("expected last sidecar commit in status")
 	}
 
@@ -98,7 +98,7 @@ func TestServiceSyncMirrorsDeletes(t *testing.T) {
 	ctx := context.Background()
 	root := newMainRepo(t)
 	remote := newBareRepo(t)
-	cfg := config.Config{Sidecar: remote, Patterns: []string{"**/SPEC.md"}}
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
@@ -121,12 +121,12 @@ func TestServiceSyncMirrorsDeletes(t *testing.T) {
 	if !result.Committed {
 		t.Fatal("expected delete sync commit")
 	}
-	if _, err := os.Stat(filepath.Join(root, sidecar.DirName, "src/auth/SPEC.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, sidecar.DirName, "project/src/auth/SPEC.md")); !os.IsNotExist(err) {
 		t.Fatalf("expected sidecar spec to be removed, stat err=%v", err)
 	}
 }
 
-func TestServiceSyncUsesDirectoryNamespaceAndSidecarBranches(t *testing.T) {
+func TestServiceSyncUsesMultipleNamespacesAndSidecarBranches(t *testing.T) {
 	setGitIdentity(t)
 
 	ctx := context.Background()
@@ -136,16 +136,15 @@ func TestServiceSyncUsesDirectoryNamespaceAndSidecarBranches(t *testing.T) {
 	repoB := newMainRepo(t)
 
 	bootstrapRepo(t, repoA, config.Config{
-		Sidecar:   remote,
-		Directory: "repo-a",
-		Patterns:  []string{"**/SPEC.md"},
+		Sidecar: remote,
+		Namespaces: []config.Namespace{
+			{Name: "skills", Patterns: []string{"skills/*.md"}},
+			{Name: "repo", Patterns: []string{"**/*.md"}, Exclude: []string{"skills/*.md"}},
+		},
 	})
-	bootstrapRepo(t, repoB, config.Config{
-		Sidecar:   remote,
-		Directory: "repo-b",
-		Patterns:  []string{"**/SPEC.md"},
-	})
+	bootstrapRepo(t, repoB, singleNamespaceConfig(remote, "repo-b", []string{"**/SPEC.md"}))
 
+	writeFile(t, repoA, "skills/review.md", "# Skill\n")
 	writeFile(t, repoA, "src/auth/SPEC.md", "# Repo A\n")
 	if _, err := service.Sync(ctx, repoA, sidecar.SyncOptions{}); err != nil {
 		t.Fatalf("sync repo A: %v", err)
@@ -155,14 +154,16 @@ func TestServiceSyncUsesDirectoryNamespaceAndSidecarBranches(t *testing.T) {
 		t.Fatalf("sync repo B: %v", err)
 	}
 
-	assertSidecarFile(t, remote, "repo-a/__branches__/main", "repo-a/src/auth/SPEC.md", "# Repo A\n")
+	assertSidecarFile(t, remote, "skills/__branches__/main", "skills/skills/review.md", "# Skill\n")
+	assertSidecarFile(t, remote, "repo/__branches__/main", "repo/src/auth/SPEC.md", "# Repo A\n")
 	assertSidecarFile(t, remote, "repo-b/__branches__/main", "repo-b/src/auth/SPEC.md", "# Repo B\n")
 
 	status, err := service.Status(ctx, repoA)
 	if err != nil {
 		t.Fatalf("status repo A: %v", err)
 	}
-	if status.Directory != "repo-a" || status.SidecarBranch != "repo-a/__branches__/main" {
+	if len(status.Namespaces) != 2 || status.Namespaces[0].Name != "skills" ||
+		status.Namespaces[0].Branch != "skills/__branches__/main" {
 		t.Fatalf("unexpected namespaced status: %#v", status)
 	}
 
@@ -180,7 +181,7 @@ func TestServiceSyncUsesDirectoryNamespaceAndSidecarBranches(t *testing.T) {
 	if _, err := service.Sync(ctx, repoA, sidecar.SyncOptions{}); err != nil {
 		t.Fatalf("delete sync repo A: %v", err)
 	}
-	assertSidecarMissing(t, remote, "repo-a/__branches__/main", "repo-a/src/auth/SPEC.md")
+	assertSidecarMissing(t, remote, "repo/__branches__/main", "repo/src/auth/SPEC.md")
 	assertSidecarFile(t, remote, "repo-b/__branches__/main", "repo-b/src/auth/SPEC.md", "# Repo B\n")
 
 	if err := os.RemoveAll(filepath.Join(repoB, sidecar.DirName)); err != nil {
@@ -199,6 +200,135 @@ func TestServiceSyncUsesDirectoryNamespaceAndSidecarBranches(t *testing.T) {
 	assertFile(t, filepath.Join(repoB, "src/auth/SPEC.md"), "# Repo B\n")
 }
 
+func TestServiceSyncRejectsOverlappingNamespaceOwnership(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, config.Config{
+		Sidecar: remote,
+		Namespaces: []config.Namespace{
+			{Name: "docs", Patterns: []string{"docs/**"}},
+			{Name: "specs", Patterns: []string{"docs/**/*.md"}},
+		},
+	})
+	writeFile(t, root, "docs/auth/SPEC.md", "# Auth\n")
+
+	_, err := sidecar.New(&gitexec.ExecRunner{}).Sync(ctx, root, sidecar.SyncOptions{})
+	if err == nil || !strings.Contains(err.Error(), "multiple skeeper namespaces") {
+		t.Fatalf("expected namespace overlap error, got %v", err)
+	}
+}
+
+func TestServiceSyncMovesFileWhenNamespaceExcludeChangesOwnership(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "repo", []string{"**/*.md"}))
+	writeFile(t, root, "skills/review.md", "# Skill\n")
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	assertSidecarFile(t, remote, "repo/__branches__/main", "repo/skills/review.md", "# Skill\n")
+
+	cfg := config.Config{
+		Sidecar: remote,
+		Namespaces: []config.Namespace{
+			{Name: "skills", Patterns: []string{"skills/*.md"}},
+			{Name: "repo", Patterns: []string{"**/*.md"}, Exclude: []string{"skills/*.md"}},
+		},
+	}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatalf("save updated config: %v", err)
+	}
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("ownership migration sync: %v", err)
+	}
+	assertSidecarMissing(t, remote, "repo/__branches__/main", "repo/skills/review.md")
+	assertSidecarFile(t, remote, "skills/__branches__/main", "skills/skills/review.md", "# Skill\n")
+}
+
+func TestServiceSyncCleansSidecarWorktreeBetweenNamespacesAfterQueuedPush(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, config.Config{
+		Sidecar: remote,
+		Namespaces: []config.Namespace{
+			{Name: "repo", Patterns: []string{"docs/*.md"}},
+			{Name: "skills", Patterns: []string{"skills/*.md"}},
+		},
+	})
+	service := sidecar.New(&gitexec.ExecRunner{})
+	writeFile(t, root, "skills/review.md", "# Skill\n")
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	assertSidecarFile(t, remote, "skills/__branches__/main", "skills/skills/review.md", "# Skill\n")
+
+	sidecarDir := filepath.Join(root, sidecar.DirName)
+	missingRemote := filepath.Join(t.TempDir(), "missing.git")
+	git(t, sidecarDir, "remote", "set-url", "origin", missingRemote)
+	writeFile(t, root, "docs/SPEC.md", "# Repo\n")
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err == nil {
+		t.Fatal("expected sync to fail while pushing repo namespace")
+	}
+
+	git(t, sidecarDir, "remote", "set-url", "origin", remote)
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("retry sync: %v", err)
+	}
+	assertSidecarFile(t, remote, "repo/__branches__/main", "repo/docs/SPEC.md", "# Repo\n")
+	assertSidecarFile(t, remote, "skills/__branches__/main", "skills/skills/review.md", "# Skill\n")
+	assertSidecarMissing(t, remote, "skills/__branches__/main", "repo/docs/SPEC.md")
+}
+
+func TestServiceHookSyncQueuesNamespaceSpecificFailure(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, config.Config{
+		Sidecar: remote,
+		Namespaces: []config.Namespace{
+			{Name: "repo", Patterns: []string{"docs/*.md"}},
+			{Name: "skills", Patterns: []string{"skills/*.md"}},
+		},
+	})
+	service := sidecar.New(&gitexec.ExecRunner{})
+	writeFile(t, root, "skills/review.md", "# Skill\n")
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	sidecarDir := filepath.Join(root, sidecar.DirName)
+	git(t, sidecarDir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing.git"))
+	writeFile(t, root, "docs/SPEC.md", "# Repo\n")
+	result, err := service.Sync(ctx, root, sidecar.SyncOptions{Hook: true})
+	if err != nil {
+		t.Fatalf("hook sync must not return an error, got %v", err)
+	}
+	if !result.Queued {
+		t.Fatal("expected failed hook sync to be queued")
+	}
+	queuePath := filepath.Join(root, ".git", "skeeper", "queue.json")
+	data, err := os.ReadFile(queuePath)
+	if err != nil {
+		t.Fatalf("read queue: %v", err)
+	}
+	queue := string(data)
+	if !strings.Contains(queue, `"namespace": "repo"`) || !strings.Contains(queue, "push sidecar branch") {
+		t.Fatalf("expected namespace-specific push failure in queue, got %s", queue)
+	}
+}
+
 func TestServiceSyncPullRebasesNamespacedBranch(t *testing.T) {
 	setGitIdentity(t)
 
@@ -206,9 +336,10 @@ func TestServiceSyncPullRebasesNamespacedBranch(t *testing.T) {
 	remote := newBareRepo(t)
 	root := newMainRepo(t)
 	cfg := config.Config{
-		Sidecar:   remote,
-		Directory: "repo-a",
-		Patterns:  []string{"**/SPEC.md"},
+		Sidecar: remote,
+		Namespaces: []config.Namespace{
+			{Name: "repo-a", Patterns: []string{"**/SPEC.md"}},
+		},
 	}
 	bootstrapRepo(t, root, cfg)
 	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
@@ -253,7 +384,7 @@ func TestServiceStatusReportsRemoteState(t *testing.T) {
 			want: "in sync",
 			setup: func(t *testing.T, fixture statusFixture) {
 				t.Helper()
-				git(t, fixture.sidecarDir, "push", "-u", "origin", "main")
+				git(t, fixture.sidecarDir, "push", "-u", "origin", "project/__branches__/main")
 			},
 		},
 		{
@@ -261,7 +392,7 @@ func TestServiceStatusReportsRemoteState(t *testing.T) {
 			want: "ahead by 1 commit(s)",
 			setup: func(t *testing.T, fixture statusFixture) {
 				t.Helper()
-				git(t, fixture.sidecarDir, "push", "-u", "origin", "main")
+				git(t, fixture.sidecarDir, "push", "-u", "origin", "project/__branches__/main")
 				commitSidecarFile(t, fixture.sidecarDir, "local/SPEC.md", "# Local\n", "local sidecar update")
 			},
 		},
@@ -270,10 +401,10 @@ func TestServiceStatusReportsRemoteState(t *testing.T) {
 			want: "behind by 1 commit(s)",
 			setup: func(t *testing.T, fixture statusFixture) {
 				t.Helper()
-				git(t, fixture.sidecarDir, "push", "-u", "origin", "main")
+				git(t, fixture.sidecarDir, "push", "-u", "origin", "project/__branches__/main")
 				base := gitOutput(t, fixture.sidecarDir, "rev-parse", "HEAD")
 				remoteCommit := commitFromCurrentTree(t, fixture.sidecarDir, base, "remote sidecar update")
-				git(t, fixture.sidecarDir, "push", "origin", remoteCommit+":refs/heads/main")
+				git(t, fixture.sidecarDir, "push", "origin", remoteCommit+":refs/heads/project/__branches__/main")
 			},
 		},
 		{
@@ -281,11 +412,11 @@ func TestServiceStatusReportsRemoteState(t *testing.T) {
 			want: "diverged (ahead 1, behind 1)",
 			setup: func(t *testing.T, fixture statusFixture) {
 				t.Helper()
-				git(t, fixture.sidecarDir, "push", "-u", "origin", "main")
+				git(t, fixture.sidecarDir, "push", "-u", "origin", "project/__branches__/main")
 				base := gitOutput(t, fixture.sidecarDir, "rev-parse", "HEAD")
 				commitSidecarFile(t, fixture.sidecarDir, "local/SPEC.md", "# Local\n", "local sidecar update")
 				remoteCommit := commitFromCurrentTree(t, fixture.sidecarDir, base, "remote sidecar update")
-				git(t, fixture.sidecarDir, "push", "origin", remoteCommit+":refs/heads/main")
+				git(t, fixture.sidecarDir, "push", "origin", remoteCommit+":refs/heads/project/__branches__/main")
 			},
 		},
 		{
@@ -309,8 +440,11 @@ func TestServiceStatusReportsRemoteState(t *testing.T) {
 			if err != nil {
 				t.Fatalf("status: %v", err)
 			}
-			if status.Remote != tt.want {
-				t.Fatalf("remote state mismatch: got %q want %q", status.Remote, tt.want)
+			if len(status.Namespaces) != 1 {
+				t.Fatalf("expected one namespace status, got %#v", status.Namespaces)
+			}
+			if status.Namespaces[0].Remote != tt.want {
+				t.Fatalf("remote state mismatch: got %q want %q", status.Namespaces[0].Remote, tt.want)
 			}
 		})
 	}
@@ -318,7 +452,7 @@ func TestServiceStatusReportsRemoteState(t *testing.T) {
 
 func TestServiceHookSyncQueuesFailureWithoutReturningError(t *testing.T) {
 	root := newMainRepo(t)
-	cfg := config.Config{Sidecar: filepath.Join(t.TempDir(), "missing.git"), Patterns: []string{"**/SPEC.md"}}
+	cfg := singleNamespaceConfig(filepath.Join(t.TempDir(), "missing.git"), "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
@@ -338,6 +472,15 @@ func TestServiceHookSyncQueuesFailureWithoutReturningError(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "clone sidecar") {
 		t.Fatalf("expected clone failure reason in queue, got %s", string(data))
+	}
+}
+
+func singleNamespaceConfig(sidecarURL, name string, patterns []string) config.Config {
+	return config.Config{
+		Sidecar: sidecarURL,
+		Namespaces: []config.Namespace{
+			{Name: name, Patterns: patterns},
+		},
 	}
 }
 
@@ -371,7 +514,7 @@ func assertSidecarMissing(t *testing.T, remote, branch, path string) {
 
 func TestServiceHookSyncReportsQueueWriteFailureWithoutReturningError(t *testing.T) {
 	root := newMainRepo(t)
-	cfg := config.Config{Sidecar: filepath.Join(t.TempDir(), "missing.git"), Patterns: []string{"**/SPEC.md"}}
+	cfg := singleNamespaceConfig(filepath.Join(t.TempDir(), "missing.git"), "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
@@ -401,7 +544,9 @@ func TestServiceInitUsesExistingCompatibleConfigIdempotently(t *testing.T) {
 	cfg := config.Config{
 		Sidecar:   remote,
 		Bootstrap: "brew install skeeper",
-		Patterns:  []string{"**/SPEC.md"},
+		Namespaces: []config.Namespace{
+			{Name: "project", Patterns: []string{"**/SPEC.md"}},
+		},
 	}
 	if err := config.Save(root, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
@@ -424,7 +569,8 @@ func TestServiceInitUsesExistingCompatibleConfigIdempotently(t *testing.T) {
 		t.Fatalf("reload config: %v", err)
 	}
 	if reloaded.Sidecar != cfg.Sidecar || reloaded.Bootstrap != cfg.Bootstrap ||
-		!sameStrings(reloaded.Patterns, cfg.Patterns) {
+		len(reloaded.Namespaces) != 1 ||
+		!sameStrings(reloaded.Namespaces[0].Patterns, cfg.Namespaces[0].Patterns) {
 		t.Fatalf("config changed unexpectedly: %#v", reloaded)
 	}
 	if _, err := os.Stat(filepath.Join(root, sidecar.DirName, ".git")); err != nil {
@@ -439,7 +585,7 @@ func TestServiceInitUsesExistingCompatibleConfigIdempotently(t *testing.T) {
 	}
 }
 
-func TestServiceInitUsesExistingSidecarURLAndDefaultDirectory(t *testing.T) {
+func TestServiceInitUsesExistingSidecarURLAndDefaultNamespace(t *testing.T) {
 	setGitIdentity(t)
 
 	ctx := context.Background()
@@ -453,8 +599,9 @@ func TestServiceInitUsesExistingSidecarURLAndDefaultDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("init with existing sidecar URL: %v", err)
 	}
-	wantDirectory := sidecar.DefaultDirectory(filepath.Base(root))
-	if result.Config.Sidecar != remote || result.Config.Directory != wantDirectory {
+	wantNamespace := sidecar.DefaultNamespace(filepath.Base(root))
+	if result.Config.Sidecar != remote || len(result.Config.Namespaces) != 1 ||
+		result.Config.Namespaces[0].Name != wantNamespace {
 		t.Fatalf("unexpected config: %#v", result.Config)
 	}
 	if _, err := os.Stat(filepath.Join(root, sidecar.DirName, ".git")); err != nil {
@@ -464,8 +611,8 @@ func TestServiceInitUsesExistingSidecarURLAndDefaultDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if reloaded.Directory != wantDirectory {
-		t.Fatalf("expected directory %q, got %q", wantDirectory, reloaded.Directory)
+	if len(reloaded.Namespaces) != 1 || reloaded.Namespaces[0].Name != wantNamespace {
+		t.Fatalf("expected namespace %q, got %#v", wantNamespace, reloaded.Namespaces)
 	}
 }
 
@@ -490,7 +637,7 @@ func TestServiceInitRejectsInvalidPatternsBeforeSideEffects(t *testing.T) {
 
 func TestServiceInitRejectsIncompatibleExistingConfig(t *testing.T) {
 	root := newMainRepo(t)
-	cfg := config.Config{Sidecar: filepath.Join(t.TempDir(), "sidecar.git"), Patterns: []string{"**/SPEC.md"}}
+	cfg := singleNamespaceConfig(filepath.Join(t.TempDir(), "sidecar.git"), "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
@@ -510,7 +657,8 @@ func TestServiceInitRejectsIncompatibleExistingConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if got.Sidecar != cfg.Sidecar || got.Patterns[0] != cfg.Patterns[0] {
+	if got.Sidecar != cfg.Sidecar || len(got.Namespaces) != 1 ||
+		got.Namespaces[0].Patterns[0] != cfg.Namespaces[0].Patterns[0] {
 		t.Fatalf("config was modified: %#v", got)
 	}
 	if _, err := os.Stat(filepath.Join(root, sidecar.DirName)); !os.IsNotExist(err) {
@@ -520,7 +668,7 @@ func TestServiceInitRejectsIncompatibleExistingConfig(t *testing.T) {
 
 func TestServiceStatusAndLogRequireExistingSidecarClone(t *testing.T) {
 	root := newMainRepo(t)
-	cfg := config.Config{Sidecar: filepath.Join(t.TempDir(), "sidecar.git"), Patterns: []string{"**/SPEC.md"}}
+	cfg := singleNamespaceConfig(filepath.Join(t.TempDir(), "sidecar.git"), "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
@@ -545,7 +693,7 @@ func TestServiceLogRejectsPathOutsideProjectRoot(t *testing.T) {
 	ctx := context.Background()
 	root := newMainRepo(t)
 	remote := newBareRepo(t)
-	cfg := config.Config{Sidecar: remote, Patterns: []string{"**/SPEC.md"}}
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
@@ -576,7 +724,7 @@ func newStatusFixture(t *testing.T) statusFixture {
 	t.Helper()
 	root := newMainRepo(t)
 	remote := newBareRepo(t)
-	cfg := config.Config{Sidecar: remote, Patterns: []string{"**/SPEC.md"}}
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
 	if err := config.Save(root, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
@@ -587,7 +735,8 @@ func newStatusFixture(t *testing.T) statusFixture {
 	sidecarDir := filepath.Join(root, sidecar.DirName)
 	git(t, "", "init", "-b", "main", sidecarDir)
 	git(t, sidecarDir, "remote", "add", "origin", remote)
-	commitSidecarFile(t, sidecarDir, "src/auth/SPEC.md", "# Auth\n", "initial sidecar sync")
+	git(t, sidecarDir, "switch", "-c", "project/__branches__/main")
+	commitSidecarFile(t, sidecarDir, "project/src/auth/SPEC.md", "# Auth\n", "initial sidecar sync")
 	return statusFixture{
 		root:       root,
 		remote:     remote,

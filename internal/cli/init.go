@@ -12,16 +12,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const noDirectoryWarning = "skeeper: warning: no directory namespace configured; " +
-	"shared sidecars can collide at root and push to the same branch\n"
-
-func newInitCmd(stdout, stderr io.Writer, service *sidecar.Service) *cobra.Command {
+func newInitCmd(stdout, _ io.Writer, service *sidecar.Service) *cobra.Command {
 	var opts sidecar.InitOptions
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Create and connect a sidecar specs repository",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			usedTUI := false
 			if shouldRunInitTUI(cmd) {
 				defaults, err := service.InitDefaults(cmd.Context(), ".")
 				if err != nil {
@@ -32,29 +28,23 @@ func newInitCmd(stdout, stderr io.Writer, service *sidecar.Service) *cobra.Comma
 					return err
 				}
 				opts = tuiOpts
-				usedTUI = true
 			} else {
-				opts.DirectorySet = cmd.Flags().Changed("directory")
+				opts.NamespaceSet = cmd.Flags().Changed("namespace")
 			}
 			result, err := service.Init(cmd.Context(), ".", opts)
 			if err != nil {
 				return err
 			}
-			if !usedTUI && opts.NoDirectory {
-				if _, err := fmt.Fprint(stderr, noDirectoryWarning); err != nil {
-					return err
-				}
-			}
-			directory := ""
-			if result.Config.Directory != "" {
-				directory = fmt.Sprintf(" Directory %s.", result.Config.Directory)
+			namespace := ""
+			if len(result.Config.Namespaces) > 0 {
+				namespace = fmt.Sprintf(" Namespace %s.", result.Config.Namespaces[0].Name)
 			}
 			_, err = fmt.Fprintf(
 				stdout,
 				"Done. Sidecar %s cloned into %s.%s Commit your code as usual - specs will sync automatically.\n",
 				result.Config.Sidecar,
 				sidecar.DirName,
-				directory,
+				namespace,
 			)
 			return err
 		},
@@ -67,8 +57,7 @@ func newInitCmd(stdout, stderr io.Writer, service *sidecar.Service) *cobra.Comma
 		"private",
 		"GitHub repository visibility: private, public, or internal",
 	)
-	cmd.Flags().StringVar(&opts.Directory, "directory", "", "sidecar directory namespace for this project")
-	cmd.Flags().BoolVar(&opts.NoDirectory, "no-directory", false, "omit the sidecar directory namespace")
+	cmd.Flags().StringVar(&opts.Namespace, "namespace", "", "sidecar namespace for this project")
 	cmd.Flags().StringVar(&opts.Bootstrap, "bootstrap", "", "optional install command stored in .skeeper.yml")
 	cmd.Flags().StringArrayVar(&opts.Patterns, "patterns", nil, "spec glob pattern; repeat for multiple patterns")
 	return cmd
@@ -96,8 +85,7 @@ func shouldRunInitTUI(cmd *cobra.Command) bool {
 		"sidecar",
 		"sidecar-name",
 		"visibility",
-		"directory",
-		"no-directory",
+		"namespace",
 		"bootstrap",
 		"patterns",
 	}, cmd.Flags().Changed)

@@ -16,9 +16,10 @@ const (
 
 // Entry records a queued sync retry.
 type Entry struct {
-	Time    time.Time `json:"time"`
-	Reason  string    `json:"reason"`
-	MainSHA string    `json:"main_sha"`
+	Time      time.Time `json:"time"`
+	Reason    string    `json:"reason"`
+	MainSHA   string    `json:"main_sha"`
+	Namespace string    `json:"namespace,omitempty"`
 }
 
 // Store manages queue and log files under .git/skeeper.

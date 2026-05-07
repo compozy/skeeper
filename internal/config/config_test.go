@@ -13,11 +13,14 @@ func TestLoadStrictConfig(t *testing.T) {
 	dir := t.TempDir()
 	content := `
 sidecar: git@github.com:user/project-specs.git
-directory: team/project
 bootstrap: curl -fsSL https://example.com/install.sh | sh
-patterns:
-  - "**/SPEC.md"
-  - "docs/specs/**"
+namespaces:
+  - name: team/project
+    patterns:
+      - "**/SPEC.md"
+      - "docs/specs/**"
+    exclude:
+      - "docs/specs/private/**"
 `
 	if err := os.WriteFile(filepath.Join(dir, Filename), []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -33,11 +36,17 @@ patterns:
 	if cfg.Bootstrap == "" {
 		t.Fatal("expected bootstrap to be loaded")
 	}
-	if cfg.Directory != "team/project" {
-		t.Fatalf("unexpected directory %q", cfg.Directory)
+	if len(cfg.Namespaces) != 1 {
+		t.Fatalf("expected 1 namespace, got %d", len(cfg.Namespaces))
 	}
-	if len(cfg.Patterns) != 2 {
-		t.Fatalf("expected 2 patterns, got %d", len(cfg.Patterns))
+	if cfg.Namespaces[0].Name != "team/project" {
+		t.Fatalf("unexpected namespace %q", cfg.Namespaces[0].Name)
+	}
+	if len(cfg.Namespaces[0].Patterns) != 2 {
+		t.Fatalf("expected 2 patterns, got %d", len(cfg.Namespaces[0].Patterns))
+	}
+	if len(cfg.Namespaces[0].Exclude) != 1 {
+		t.Fatalf("expected 1 exclude, got %d", len(cfg.Namespaces[0].Exclude))
 	}
 }
 
@@ -47,8 +56,10 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 	dir := t.TempDir()
 	content := `
 sidecar: git@github.com:user/project-specs.git
-patterns:
-  - "**/SPEC.md"
+namespaces:
+  - name: project
+    patterns:
+      - "**/SPEC.md"
 extra: true
 `
 	if err := os.WriteFile(filepath.Join(dir, Filename), []byte(content), 0o644); err != nil {
@@ -69,28 +80,58 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 	}{
 		{
 			name: "missing sidecar",
-			cfg:  Config{Patterns: []string{"**/SPEC.md"}},
+			cfg: Config{Namespaces: []Namespace{
+				{Name: "project", Patterns: []string{"**/SPEC.md"}},
+			}},
 		},
 		{
-			name: "missing patterns",
+			name: "missing namespaces",
 			cfg:  Config{Sidecar: "git@github.com:user/project-specs.git"},
 		},
 		{
+			name: "missing namespace name",
+			cfg: Config{
+				Sidecar: "git@github.com:user/project-specs.git",
+				Namespaces: []Namespace{
+					{Patterns: []string{"**/SPEC.md"}},
+				},
+			},
+		},
+		{
 			name: "empty pattern",
-			cfg:  Config{Sidecar: "git@github.com:user/project-specs.git", Patterns: []string{" "}},
+			cfg: Config{
+				Sidecar: "git@github.com:user/project-specs.git",
+				Namespaces: []Namespace{
+					{Name: "project", Patterns: []string{" "}},
+				},
+			},
+		},
+		{
+			name: "duplicate namespace",
+			cfg: Config{
+				Sidecar: "git@github.com:user/project-specs.git",
+				Namespaces: []Namespace{
+					{Name: "project", Patterns: []string{"**/SPEC.md"}},
+					{Name: "project", Patterns: []string{"docs/specs/**"}},
+				},
+			},
 		},
 		{
 			name: "duplicate pattern",
 			cfg: Config{
-				Sidecar:  "git@github.com:user/project-specs.git",
-				Patterns: []string{"**/SPEC.md", "**/SPEC.md"},
+				Sidecar: "git@github.com:user/project-specs.git",
+				Namespaces: []Namespace{
+					{Name: "project", Patterns: []string{"**/SPEC.md", "**/SPEC.md"}},
+				},
 			},
 		},
 		{
-			name: "invalid pattern",
+			name: "invalid exclude",
 			cfg: Config{
-				Sidecar:  "git@github.com:user/project-specs.git",
-				Patterns: []string{"["},
+				Sidecar: "git@github.com:user/project-specs.git",
+				Namespaces: []Namespace{
+					{Name: "project", Patterns: []string{"**/SPEC.md"}, Exclude: []string{"["}},
+				},
 			},
 		},
 	}
@@ -109,20 +150,32 @@ func TestNormalizeCanonicalizesPatterns(t *testing.T) {
 	t.Parallel()
 
 	cfg := Config{
-		Sidecar:  "git@github.com:user/project-specs.git",
-		Patterns: []string{" ./docs/specs/** ", "src\\**\\SPEC.md"},
+		Sidecar: "git@github.com:user/project-specs.git",
+		Namespaces: []Namespace{
+			{
+				Name:     " team/project ",
+				Patterns: []string{" ./docs/specs/** ", "src\\**\\SPEC.md"},
+				Exclude:  []string{" ./docs/specs/private/** "},
+			},
+		},
 	}
 	normalized, err := cfg.Normalize()
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
 	want := []string{"docs/specs/**", "src/**/SPEC.md"}
-	if strings.Join(normalized.Patterns, ",") != strings.Join(want, ",") {
-		t.Fatalf("patterns mismatch: got %#v want %#v", normalized.Patterns, want)
+	if normalized.Namespaces[0].Name != "team/project" {
+		t.Fatalf("namespace mismatch: got %q", normalized.Namespaces[0].Name)
+	}
+	if strings.Join(normalized.Namespaces[0].Patterns, ",") != strings.Join(want, ",") {
+		t.Fatalf("patterns mismatch: got %#v want %#v", normalized.Namespaces[0].Patterns, want)
+	}
+	if strings.Join(normalized.Namespaces[0].Exclude, ",") != "docs/specs/private/**" {
+		t.Fatalf("exclude mismatch: got %#v", normalized.Namespaces[0].Exclude)
 	}
 }
 
-func TestCleanDirectory(t *testing.T) {
+func TestCleanNamespace(t *testing.T) {
 	t.Parallel()
 
 	valid := []struct {
@@ -138,12 +191,12 @@ func TestCleanDirectory(t *testing.T) {
 	for _, tc := range valid {
 		t.Run("valid "+tc.input, func(t *testing.T) {
 			t.Parallel()
-			got, err := CleanDirectory(tc.input)
+			got, err := CleanNamespace(tc.input)
 			if err != nil {
-				t.Fatalf("clean directory: %v", err)
+				t.Fatalf("clean namespace: %v", err)
 			}
 			if got != tc.want {
-				t.Fatalf("clean directory mismatch: got %q want %q", got, tc.want)
+				t.Fatalf("clean namespace mismatch: got %q want %q", got, tc.want)
 			}
 		})
 	}
@@ -166,7 +219,7 @@ func TestCleanDirectory(t *testing.T) {
 	for _, input := range invalid {
 		t.Run("invalid "+input, func(t *testing.T) {
 			t.Parallel()
-			if _, err := CleanDirectory(input); err == nil {
+			if _, err := CleanNamespace(input); err == nil {
 				t.Fatal("expected validation error, got nil")
 			}
 		})
@@ -179,9 +232,10 @@ func TestSaveRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{
 		Sidecar:   "git@github.com:user/project-specs.git",
-		Directory: "team/project",
 		Bootstrap: "brew install user/tap/skeeper",
-		Patterns:  []string{"**/SPEC.md"},
+		Namespaces: []Namespace{
+			{Name: "team/project", Patterns: []string{"**/SPEC.md"}, Exclude: []string{"private/**"}},
+		},
 	}
 	if err := Save(dir, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
@@ -193,15 +247,16 @@ func TestSaveRoundTrip(t *testing.T) {
 	if !strings.Contains(string(data), "bootstrap: brew install") {
 		t.Fatalf("expected bootstrap in saved config, got:\n%s", string(data))
 	}
-	if !strings.Contains(string(data), "directory: team/project") {
-		t.Fatalf("expected directory in saved config, got:\n%s", string(data))
+	if !strings.Contains(string(data), "name: team/project") {
+		t.Fatalf("expected namespace in saved config, got:\n%s", string(data))
 	}
 	got, err := Load(dir)
 	if err != nil {
 		t.Fatalf("load saved config: %v", err)
 	}
-	if got.Sidecar != cfg.Sidecar || got.Directory != cfg.Directory ||
-		got.Bootstrap != cfg.Bootstrap || len(got.Patterns) != 1 {
+	if got.Sidecar != cfg.Sidecar || got.Bootstrap != cfg.Bootstrap ||
+		len(got.Namespaces) != 1 || got.Namespaces[0].Name != "team/project" ||
+		len(got.Namespaces[0].Patterns) != 1 || len(got.Namespaces[0].Exclude) != 1 {
 		t.Fatalf("round trip mismatch: %#v", got)
 	}
 }

@@ -220,6 +220,28 @@ func (g *Git) AddAll(ctx context.Context, dir string) error {
 	return nil
 }
 
+// ResetAndClean restores the current HEAD worktree and removes untracked files.
+func (g *Git) ResetAndClean(ctx context.Context, dir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	repo, err := openRepository(dir)
+	if err != nil {
+		return err
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return err
+	}
+	if err := worktree.Reset(&gogit.ResetOptions{Mode: gogit.HardReset}); err != nil {
+		return fmt.Errorf("restore worktree to HEAD: %w", err)
+	}
+	if err := worktree.Clean(&gogit.CleanOptions{Dir: true}); err != nil {
+		return fmt.Errorf("remove untracked worktree files: %w", err)
+	}
+	return nil
+}
+
 // AheadBehind counts commits reachable from left but not right, and right but not left.
 func (g *Git) AheadBehind(ctx context.Context, dir, left, right string) (int, int, error) {
 	if err := ctx.Err(); err != nil {

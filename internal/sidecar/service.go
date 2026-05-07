@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bmatcuk/doublestar/v4"
 	"github.com/compozy/skeeper/internal/config"
 	"github.com/compozy/skeeper/internal/gitexec"
 	"github.com/compozy/skeeper/internal/hooks"
@@ -21,9 +20,10 @@ import (
 
 const (
 	// DirName is the sidecar clone directory in the main worktree.
-	DirName       = ".skeeper"
-	stateDirName  = "skeeper"
-	remoteUnknown = "unknown"
+	DirName              = ".skeeper"
+	stateDirName         = "skeeper"
+	remoteUnknown        = "unknown"
+	hookNamespaceTimeout = 750 * time.Millisecond
 )
 
 // Service executes sidecar workflows.
@@ -45,9 +45,8 @@ type InitOptions struct {
 	Sidecar      string
 	SidecarName  string
 	Visibility   string
-	Directory    string
-	DirectorySet bool
-	NoDirectory  bool
+	Namespace    string
+	NamespaceSet bool
 	Bootstrap    string
 	Patterns     []string
 }
@@ -56,7 +55,7 @@ type InitOptions struct {
 type InitDefaults struct {
 	SidecarName string
 	Visibility  string
-	Directory   string
+	Namespace   string
 	Patterns    []string
 }
 
@@ -79,7 +78,7 @@ func (s *Service) InitDefaults(ctx context.Context, dir string) (InitDefaults, e
 	return InitDefaults{
 		SidecarName: name + "-specs",
 		Visibility:  "private",
-		Directory:   DefaultDirectory(name),
+		Namespace:   DefaultNamespace(name),
 		Patterns:    config.DefaultPatterns(),
 	}, nil
 }
@@ -109,6 +108,10 @@ func (s *Service) Init(ctx context.Context, dir string, opts InitOptions) (InitR
 	if len(patterns) == 0 {
 		patterns = config.DefaultPatterns()
 	}
+	namespace, err := initNamespace(root, opts)
+	if err != nil {
+		return InitResult{}, err
+	}
 	if exists(filepath.Join(root, config.Filename)) {
 		return s.initExistingProject(ctx, root, opts)
 	}
@@ -124,20 +127,17 @@ func (s *Service) Init(ctx context.Context, dir string, opts InitOptions) (InitR
 		return InitResult{}, fmt.Errorf("clone sidecar into %s: %w", DirName, err)
 	}
 
-	directory, err := initDirectory(root, opts)
-	if err != nil {
-		return InitResult{}, err
-	}
 	cfg := config.Config{
 		Sidecar:   sidecarURL,
-		Directory: directory,
 		Bootstrap: strings.TrimSpace(opts.Bootstrap),
-		Patterns:  patterns,
+		Namespaces: []config.Namespace{
+			{Name: namespace, Patterns: patterns},
+		},
 	}
 	if err := config.Save(root, cfg); err != nil {
 		return InitResult{}, err
 	}
-	if err := UpdateGitignore(root, cfg.Patterns); err != nil {
+	if err := UpdateGitignore(root, cfg.Namespaces); err != nil {
 		return InitResult{}, err
 	}
 	gitDir, err := s.git.GitDir(ctx, root)
@@ -161,11 +161,8 @@ func validateInitOptions(opts InitOptions) error {
 	if strings.TrimSpace(opts.Sidecar) != "" && strings.TrimSpace(opts.SidecarName) != "" {
 		return errors.New("sidecar and sidecar name are mutually exclusive")
 	}
-	if opts.NoDirectory && opts.DirectorySet {
-		return errors.New("directory and no-directory are mutually exclusive")
-	}
-	if opts.DirectorySet && strings.TrimSpace(opts.Directory) == "" {
-		return errors.New("directory cannot be empty; use no-directory to opt out")
+	if opts.NamespaceSet && strings.TrimSpace(opts.Namespace) == "" {
+		return errors.New("namespace cannot be empty")
 	}
 	return nil
 }
@@ -187,15 +184,12 @@ func (s *Service) initSidecarURL(
 	return s.remoteSSHURL(ctx, root, name)
 }
 
-func initDirectory(root string, opts InitOptions) (string, error) {
-	if opts.NoDirectory {
-		return "", nil
+func initNamespace(root string, opts InitOptions) (string, error) {
+	namespace := strings.TrimSpace(opts.Namespace)
+	if !opts.NamespaceSet {
+		namespace = DefaultNamespace(gitexec.RepoBaseName(root))
 	}
-	directory := strings.TrimSpace(opts.Directory)
-	if !opts.DirectorySet {
-		directory = DefaultDirectory(gitexec.RepoBaseName(root))
-	}
-	return config.CleanDirectory(directory)
+	return config.CleanNamespace(namespace)
 }
 
 func (s *Service) initExistingProject(ctx context.Context, root string, opts InitOptions) (InitResult, error) {
@@ -209,7 +203,7 @@ func (s *Service) initExistingProject(ctx context.Context, root string, opts Ini
 	if err := s.ensureClone(ctx, root, cfg.Sidecar); err != nil {
 		return InitResult{}, err
 	}
-	if err := UpdateGitignore(root, cfg.Patterns); err != nil {
+	if err := UpdateGitignore(root, cfg.Namespaces); err != nil {
 		return InitResult{}, err
 	}
 	gitDir, err := s.git.GitDir(ctx, root)
@@ -247,21 +241,42 @@ func (s *Service) Hydrate(ctx context.Context, dir string) (HydrateResult, error
 	if err != nil {
 		return HydrateResult{}, err
 	}
-	if err := s.tryUseBranch(ctx, sidecarPath(root), branchName(cfg, sourceBranch)); err != nil {
-		return HydrateResult{}, err
-	}
-
-	storageDir := sidecarStoragePath(root, cfg)
-	files, err := findMatchedFiles(ctx, storageDir, cfg.Patterns)
-	if err != nil {
-		return HydrateResult{}, err
-	}
-	for _, file := range files {
-		if err := copyFile(
-			filepath.Join(storageDir, filepath.FromSlash(file)),
-			filepath.Join(root, filepath.FromSlash(file)),
-		); err != nil {
+	restored := make([]string, 0)
+	restoredBy := make(map[string]string)
+	for _, namespace := range cfg.Namespaces {
+		branch := branchName(namespace.Name, sourceBranch)
+		ok, err := s.useExistingBranch(ctx, sidecarPath(root), branch)
+		if err != nil {
 			return HydrateResult{}, err
+		}
+		if !ok {
+			continue
+		}
+		storageDir := sidecarStoragePath(root, namespace.Name)
+		files, err := findMatchedFiles(ctx, storageDir, namespace.Patterns)
+		if err != nil {
+			return HydrateResult{}, err
+		}
+		for _, file := range files {
+			if !namespace.Owns(file) {
+				continue
+			}
+			if previous, ok := restoredBy[file]; ok {
+				return HydrateResult{}, fmt.Errorf(
+					"%s would be restored from multiple skeeper namespaces: %s, %s",
+					file,
+					previous,
+					namespace.Name,
+				)
+			}
+			restoredBy[file] = namespace.Name
+			if err := copyFile(
+				filepath.Join(storageDir, filepath.FromSlash(file)),
+				filepath.Join(root, filepath.FromSlash(file)),
+			); err != nil {
+				return HydrateResult{}, err
+			}
+			restored = append(restored, file)
 		}
 	}
 
@@ -276,7 +291,7 @@ func (s *Service) Hydrate(ctx context.Context, dir string) (HydrateResult, error
 	if short, err := s.git.HeadShortSHA(ctx, sidecarPath(root)); err == nil {
 		commit = short
 	}
-	return HydrateResult{Restored: files, Commit: commit}, nil
+	return HydrateResult{Restored: restored, Commit: commit}, nil
 }
 
 // SyncOptions configures a sync run.
@@ -290,27 +305,25 @@ type SyncResult struct {
 	ChangedFiles int
 	Committed    bool
 	Commit       string
+	Namespaces   []NamespaceSyncResult
 	Queued       bool
 	QueueFailed  bool
 	QueueError   string
 }
 
-type syncContext struct {
-	root          string
-	cfg           config.Config
-	store         *state.Store
-	sidecarBranch string
-	mainFiles     []string
-	sidecarDir    string
-	storageDir    string
+// NamespaceSyncResult reports one namespace sync outcome.
+type NamespaceSyncResult struct {
+	Name         string
+	Branch       string
+	ChangedFiles int
+	Committed    bool
+	Commit       string
 }
 
 // Sync mirrors main-tree spec files into the sidecar and pushes the branch.
 func (s *Service) Sync(ctx context.Context, dir string, opts SyncOptions) (SyncResult, error) {
 	if opts.Hook {
-		hookCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
-		defer cancel()
-		result, err := s.sync(hookCtx, dir, opts)
+		result, err := s.sync(ctx, dir, opts)
 		if err == nil {
 			return result, nil
 		}
@@ -323,84 +336,167 @@ func (s *Service) Sync(ctx context.Context, dir string, opts SyncOptions) (SyncR
 }
 
 func (s *Service) sync(ctx context.Context, dir string, opts SyncOptions) (SyncResult, error) {
-	syncCtx, err := s.prepareSync(ctx, dir, opts)
+	project, err := s.prepareProject(ctx, dir)
 	if err != nil {
 		return SyncResult{}, err
 	}
-	sidecarFiles, err := findMatchedFiles(ctx, syncCtx.storageDir, syncCtx.cfg.Patterns)
+	routes, err := resolveMainRoutes(ctx, project.root, project.cfg)
 	if err != nil {
 		return SyncResult{}, err
 	}
-	if err := mirrorFiles(syncCtx.root, syncCtx.storageDir, syncCtx.mainFiles, sidecarFiles); err != nil {
-		return SyncResult{}, err
-	}
-	if err := s.git.AddAll(ctx, syncCtx.sidecarDir); err != nil {
-		return SyncResult{}, fmt.Errorf("stage sidecar changes: %w", err)
-	}
-	dirty, err := s.dirty(ctx, syncCtx.sidecarDir)
-	if err != nil {
-		return SyncResult{}, err
-	}
-	if !dirty {
-		if err := s.flushQueuedPush(ctx, syncCtx); err != nil {
-			return SyncResult{}, err
+	result := SyncResult{}
+	for _, route := range routes {
+		routeCtx := ctx
+		cancel := func() {}
+		if opts.Hook {
+			routeCtx, cancel = context.WithTimeout(ctx, hookNamespaceTimeout)
 		}
-		if err := syncCtx.store.ClearQueue(); err != nil {
-			return SyncResult{}, err
+		branch := branchName(route.Namespace.Name, project.sourceBranch)
+		if err := s.ensureBranch(routeCtx, project.sidecarDir, branch); err != nil {
+			cancel()
+			return SyncResult{}, namespaceSyncError{Namespace: route.Namespace.Name, Err: err}
 		}
-		return SyncResult{ChangedFiles: len(syncCtx.mainFiles)}, nil
+		if opts.Pull {
+			if err := s.pullBranch(routeCtx, project.sidecarDir, branch); err != nil {
+				cancel()
+				return SyncResult{}, namespaceSyncError{Namespace: route.Namespace.Name, Err: err}
+			}
+		}
+		storageDir := sidecarStoragePath(project.root, route.Namespace.Name)
+		sidecarFiles, err := findMatchedFiles(routeCtx, storageDir, route.Namespace.Patterns)
+		if err != nil {
+			cancel()
+			return SyncResult{}, namespaceSyncError{Namespace: route.Namespace.Name, Err: err}
+		}
+		if err := mirrorFiles(project.root, storageDir, route.Files, sidecarFiles); err != nil {
+			cancel()
+			return SyncResult{}, namespaceSyncError{Namespace: route.Namespace.Name, Err: err}
+		}
+		if err := s.git.AddAll(routeCtx, project.sidecarDir); err != nil {
+			cancel()
+			return SyncResult{}, namespaceSyncError{
+				Namespace: route.Namespace.Name,
+				Err:       fmt.Errorf("stage sidecar changes: %w", err),
+			}
+		}
+		dirty, err := s.dirty(routeCtx, project.sidecarDir)
+		if err != nil {
+			cancel()
+			return SyncResult{}, namespaceSyncError{Namespace: route.Namespace.Name, Err: err}
+		}
+		namespaceResult := NamespaceSyncResult{
+			Name:         route.Namespace.Name,
+			Branch:       branch,
+			ChangedFiles: len(route.Files),
+		}
+		if dirty {
+			commit, err := s.commitAndPush(routeCtx, project, branch, route)
+			if err != nil {
+				cancel()
+				return SyncResult{}, namespaceSyncError{Namespace: route.Namespace.Name, Err: err}
+			}
+			namespaceResult.Committed = true
+			namespaceResult.Commit = commit
+			result.Committed = true
+			if result.Commit == "" {
+				result.Commit = commit
+			}
+		} else if err := s.flushQueuedPush(routeCtx, project, branch); err != nil {
+			cancel()
+			return SyncResult{}, namespaceSyncError{Namespace: route.Namespace.Name, Err: err}
+		}
+		cancel()
+		result.ChangedFiles += len(route.Files)
+		result.Namespaces = append(result.Namespaces, namespaceResult)
 	}
-
-	commit, err := s.commitAndPush(ctx, syncCtx)
-	if err != nil {
+	if err := project.store.ClearQueue(); err != nil {
 		return SyncResult{}, err
 	}
-	return SyncResult{ChangedFiles: len(syncCtx.mainFiles), Committed: true, Commit: commit}, nil
+	return result, nil
 }
 
-func (s *Service) prepareSync(ctx context.Context, dir string, opts SyncOptions) (syncContext, error) {
+type namespaceSyncError struct {
+	Namespace string
+	Err       error
+}
+
+func (e namespaceSyncError) Error() string {
+	return fmt.Sprintf("sync namespace %q: %v", e.Namespace, e.Err)
+}
+
+func (e namespaceSyncError) Unwrap() error {
+	return e.Err
+}
+
+type projectContext struct {
+	root         string
+	cfg          config.Config
+	store        *state.Store
+	sidecarDir   string
+	sourceBranch string
+}
+
+type namespaceRoute struct {
+	Namespace config.Namespace
+	Files     []string
+}
+
+func (s *Service) prepareProject(ctx context.Context, dir string) (projectContext, error) {
 	root, cfg, store, err := s.loadProject(ctx, dir)
 	if err != nil {
-		return syncContext{}, err
+		return projectContext{}, err
 	}
 	if err := s.ensureClone(ctx, root, cfg.Sidecar); err != nil {
-		return syncContext{}, err
+		return projectContext{}, err
 	}
 	sourceBranch, err := s.git.CurrentBranch(ctx, root)
 	if err != nil {
-		return syncContext{}, err
+		return projectContext{}, err
 	}
-	sidecarDir := sidecarPath(root)
-	sidecarBranch := branchName(cfg, sourceBranch)
-	if err := s.ensureBranch(ctx, sidecarDir, sidecarBranch); err != nil {
-		return syncContext{}, err
-	}
-	if opts.Pull {
-		if err := s.pullBranch(ctx, sidecarDir, sidecarBranch); err != nil {
-			return syncContext{}, err
-		}
-	}
-	mainFiles, err := matcher.FindContext(ctx, root, cfg.Patterns)
-	if err != nil {
-		return syncContext{}, err
-	}
-	return syncContext{
-		root:          root,
-		cfg:           cfg,
-		store:         store,
-		sidecarBranch: sidecarBranch,
-		mainFiles:     mainFiles,
-		sidecarDir:    sidecarDir,
-		storageDir:    sidecarStoragePath(root, cfg),
+	return projectContext{
+		root:         root,
+		cfg:          cfg,
+		store:        store,
+		sidecarDir:   sidecarPath(root),
+		sourceBranch: sourceBranch,
 	}, nil
 }
 
-func (s *Service) commitAndPush(ctx context.Context, syncCtx syncContext) (string, error) {
-	mainSHA, err := s.git.HeadSHA(ctx, syncCtx.root)
+func resolveMainRoutes(ctx context.Context, root string, cfg config.Config) ([]namespaceRoute, error) {
+	routes := make([]namespaceRoute, 0, len(cfg.Namespaces))
+	owners := make(map[string]string)
+	for _, namespace := range cfg.Namespaces {
+		files, err := matcher.FindContext(ctx, root, namespace.Patterns)
+		if err != nil {
+			return nil, err
+		}
+		owned := make([]string, 0, len(files))
+		for _, file := range files {
+			if !namespace.Owns(file) {
+				continue
+			}
+			if previous, ok := owners[file]; ok {
+				return nil, fmt.Errorf("%s matches multiple skeeper namespaces: %s, %s", file, previous, namespace.Name)
+			}
+			owners[file] = namespace.Name
+			owned = append(owned, file)
+		}
+		routes = append(routes, namespaceRoute{Namespace: namespace, Files: owned})
+	}
+	return routes, nil
+}
+
+func (s *Service) commitAndPush(
+	ctx context.Context,
+	project projectContext,
+	branch string,
+	route namespaceRoute,
+) (string, error) {
+	mainSHA, err := s.git.HeadSHA(ctx, project.root)
 	if err != nil {
 		return "", err
 	}
-	mainSubject, err := s.git.HeadSubject(ctx, syncCtx.root)
+	mainSubject, err := s.git.HeadSubject(ctx, project.root)
 	if err != nil {
 		return "", err
 	}
@@ -411,7 +507,7 @@ func (s *Service) commitAndPush(ctx context.Context, syncCtx syncContext) (strin
 	message := fmt.Sprintf("sync %s - %s", shortSHA, mainSubject)
 	if _, err := s.runner.Run(
 		ctx,
-		syncCtx.sidecarDir,
+		project.sidecarDir,
 		"git",
 		"commit",
 		"-m",
@@ -419,78 +515,91 @@ func (s *Service) commitAndPush(ctx context.Context, syncCtx syncContext) (strin
 		"-m",
 		"Main-Commit: "+mainSHA,
 	); err != nil {
-		return "", fmt.Errorf("commit sidecar changes: %w", err)
+		return "", fmt.Errorf("commit sidecar changes for namespace %q: %w", route.Namespace.Name, err)
 	}
 	if _, err := s.runner.Run(
 		ctx,
-		syncCtx.sidecarDir,
+		project.sidecarDir,
 		"git",
 		"push",
 		"-u",
 		"origin",
-		syncCtx.sidecarBranch,
+		branch,
 	); err != nil {
-		return "", fmt.Errorf("push sidecar branch %q: %w", syncCtx.sidecarBranch, err)
+		return "", fmt.Errorf("push sidecar branch %q: %w", branch, err)
 	}
 	commit := ""
-	if short, err := s.git.HeadShortSHA(ctx, syncCtx.sidecarDir); err == nil {
+	if short, err := s.git.HeadShortSHA(ctx, project.sidecarDir); err == nil {
 		commit = short
 	}
-	if err := syncCtx.store.ClearQueue(); err != nil {
-		return "", err
-	}
-	if err := syncCtx.store.AppendLog(
-		fmt.Sprintf("synced %d specs at %s", len(syncCtx.mainFiles), commit),
+	if err := project.store.AppendLog(
+		fmt.Sprintf("synced %d specs in namespace %s at %s", len(route.Files), route.Namespace.Name, commit),
 	); err != nil {
 		return "", err
 	}
 	return commit, nil
 }
 
-func (s *Service) flushQueuedPush(ctx context.Context, syncCtx syncContext) error {
-	queue, err := syncCtx.store.Queue()
+func (s *Service) flushQueuedPush(ctx context.Context, project projectContext, branch string) error {
+	queue, err := project.store.Queue()
 	if err != nil {
 		return err
 	}
-	if len(queue) == 0 {
+	if hasHead := s.git.HasHead(ctx, project.sidecarDir); !hasHead {
 		return nil
 	}
-	if hasHead := s.git.HasHead(ctx, syncCtx.sidecarDir); !hasHead {
+	shouldPush, err := s.shouldPushCleanBranch(ctx, project.sidecarDir, branch, len(queue) > 0)
+	if err != nil {
+		return err
+	}
+	if !shouldPush {
 		return nil
 	}
 	if _, err := s.runner.Run(
 		ctx,
-		syncCtx.sidecarDir,
+		project.sidecarDir,
 		"git",
 		"push",
 		"-u",
 		"origin",
-		syncCtx.sidecarBranch,
+		branch,
 	); err != nil {
-		return fmt.Errorf("push queued sidecar branch %q: %w", syncCtx.sidecarBranch, err)
+		return fmt.Errorf("push queued sidecar branch %q: %w", branch, err)
 	}
-	return syncCtx.store.AppendLog(fmt.Sprintf("flushed queued sidecar push for %s", syncCtx.sidecarBranch))
+	return project.store.AppendLog(fmt.Sprintf("flushed pending sidecar push for %s", branch))
 }
 
-func (s *Service) hasHead(ctx context.Context, dir string) bool {
-	return s.git.HasHead(ctx, dir)
-}
-
-func (s *Service) hasLocalBranch(ctx context.Context, dir, branch string) bool {
-	return s.git.RefExists(ctx, dir, "refs/heads/"+branch)
+func (s *Service) shouldPushCleanBranch(ctx context.Context, sidecarDir, branch string, queued bool) (bool, error) {
+	if queued {
+		return true, nil
+	}
+	remoteRef := "refs/remotes/origin/" + branch
+	if !s.git.RefExists(ctx, sidecarDir, remoteRef) {
+		return true, nil
+	}
+	ahead, _, err := s.git.AheadBehind(ctx, sidecarDir, "HEAD", remoteRef)
+	if err != nil {
+		return false, fmt.Errorf("compare sidecar branch %q with origin: %w", branch, err)
+	}
+	return ahead > 0, nil
 }
 
 // Status describes the current sidecar state.
 type Status struct {
-	Sidecar       string
-	Branch        string
-	Directory     string
-	SidecarBranch string
-	LastCommit    string
-	LastUnix      int64
-	Remote        string
-	TrackedFiles  int
-	PendingSync   int
+	Sidecar     string
+	Branch      string
+	Namespaces  []NamespaceStatus
+	PendingSync int
+}
+
+// NamespaceStatus describes one namespace's sidecar state.
+type NamespaceStatus struct {
+	Name         string
+	Branch       string
+	LastCommit   string
+	LastUnix     int64
+	Remote       string
+	TrackedFiles int
 }
 
 // Status returns a summary suitable for CLI display.
@@ -507,12 +616,7 @@ func (s *Service) Status(ctx context.Context, dir string) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	sidecarBranch := branchName(cfg, branch)
-	if err := s.tryUseBranch(ctx, sidecarDir, sidecarBranch); err != nil {
-		return Status{}, err
-	}
-	branchAvailable := s.hasLocalBranch(ctx, sidecarDir, sidecarBranch)
-	files, err := matcher.FindContext(ctx, root, cfg.Patterns)
+	routes, err := resolveMainRoutes(ctx, root, cfg)
 	if err != nil {
 		return Status{}, err
 	}
@@ -520,31 +624,42 @@ func (s *Service) Status(ctx context.Context, dir string) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	lastCommit := ""
-	lastUnix := int64(0)
-	if branchAvailable {
-		if info, err := s.git.LastCommit(ctx, sidecarDir); err == nil {
-			lastCommit = info.ShortHash
-			lastUnix = info.Unix
+	namespaces := make([]NamespaceStatus, 0, len(routes))
+	for _, route := range routes {
+		sidecarBranch := branchName(route.Namespace.Name, branch)
+		branchAvailable, err := s.useExistingBranch(ctx, sidecarDir, sidecarBranch)
+		if err != nil {
+			return Status{}, err
 		}
-	}
-	remote := "not pushed"
-	if !s.hasHead(ctx, sidecarDir) {
-		remote = "no local commits"
-	}
-	if branchAvailable {
-		remote = s.remoteState(ctx, sidecarDir, sidecarBranch)
+		lastCommit := ""
+		lastUnix := int64(0)
+		if branchAvailable {
+			if info, err := s.git.LastCommit(ctx, sidecarDir); err == nil {
+				lastCommit = info.ShortHash
+				lastUnix = info.Unix
+			}
+		}
+		remote := "not pushed"
+		if !s.git.HasHead(ctx, sidecarDir) {
+			remote = "no local commits"
+		}
+		if branchAvailable {
+			remote = s.remoteState(ctx, sidecarDir, sidecarBranch)
+		}
+		namespaces = append(namespaces, NamespaceStatus{
+			Name:         route.Namespace.Name,
+			Branch:       sidecarBranch,
+			LastCommit:   lastCommit,
+			LastUnix:     lastUnix,
+			Remote:       remote,
+			TrackedFiles: len(route.Files),
+		})
 	}
 	return Status{
-		Sidecar:       cfg.Sidecar,
-		Branch:        branch,
-		Directory:     cfg.Directory,
-		SidecarBranch: sidecarBranch,
-		LastCommit:    lastCommit,
-		LastUnix:      lastUnix,
-		Remote:        remote,
-		TrackedFiles:  len(files),
-		PendingSync:   len(queue),
+		Sidecar:     cfg.Sidecar,
+		Branch:      branch,
+		Namespaces:  namespaces,
+		PendingSync: len(queue),
 	}, nil
 }
 
@@ -561,22 +676,52 @@ func (s *Service) Log(ctx context.Context, dir, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve log path: %w", err)
 	}
-	if !pathMatchesPatterns(rel, cfg.Patterns) {
-		return "", fmt.Errorf("%s does not match configured skeeper patterns", rel)
+	namespace, err := ownerForPath(cfg, rel)
+	if err != nil {
+		return "", err
 	}
 	sourceBranch, err := s.git.CurrentBranch(ctx, root)
 	if err != nil {
 		return "", err
 	}
-	if err := s.tryUseBranch(ctx, sidecarPath(root), branchName(cfg, sourceBranch)); err != nil {
+	ok, err := s.useExistingBranch(ctx, sidecarPath(root), branchName(namespace.Name, sourceBranch))
+	if err != nil {
 		return "", err
 	}
-	sidecarRel := sidecarFilePath(cfg, rel)
+	if !ok {
+		return "", nil
+	}
+	sidecarRel := sidecarFilePath(namespace.Name, rel)
 	result, err := s.runner.Run(ctx, sidecarPath(root), "git", "log", "--pretty=format:%h\t%cr\t%s", "--", sidecarRel)
 	if err != nil {
 		return "", fmt.Errorf("read sidecar log for %s: %w", rel, err)
 	}
 	return result.Stdout, nil
+}
+
+func ownerForPath(cfg config.Config, rel string) (config.Namespace, error) {
+	var owner config.Namespace
+	count := 0
+	for _, namespace := range cfg.Namespaces {
+		if namespace.Owns(rel) {
+			count++
+			if count == 1 {
+				owner = namespace
+			}
+		}
+	}
+	switch count {
+	case 0:
+		return config.Namespace{}, fmt.Errorf("%s does not match configured skeeper namespaces", rel)
+	case 1:
+		return owner, nil
+	default:
+		return config.Namespace{}, fmt.Errorf(
+			"%s matches multiple skeeper namespaces including %s",
+			rel,
+			owner.Name,
+		)
+	}
 }
 
 func (s *Service) createRemote(ctx context.Context, root, name, visibility string) error {
@@ -636,7 +781,7 @@ func (s *Service) remoteState(ctx context.Context, sidecarDir, branch string) st
 	if dirty {
 		return "local changes"
 	}
-	if !s.hasHead(ctx, sidecarDir) {
+	if !s.git.HasHead(ctx, sidecarDir) {
 		return "no local commits"
 	}
 	if _, err := s.runner.Run(ctx, sidecarDir, "git", "fetch", "origin"); err != nil {
@@ -687,16 +832,16 @@ func requireClone(root string) error {
 	return fmt.Errorf("%s clone missing; run `skeeper hydrate`", DirName)
 }
 
-func (s *Service) tryUseBranch(ctx context.Context, sidecarDir, branch string) error {
+func (s *Service) useExistingBranch(ctx context.Context, sidecarDir, branch string) (bool, error) {
 	if s.git.RefExists(ctx, sidecarDir, "refs/heads/"+branch) {
 		_, switchErr := s.runner.Run(ctx, sidecarDir, "git", "switch", branch)
-		return switchErr
+		return switchErr == nil, switchErr
 	}
 	if s.git.RefExists(ctx, sidecarDir, "refs/remotes/origin/"+branch) {
 		_, switchErr := s.runner.Run(ctx, sidecarDir, "git", "switch", "--track", "origin/"+branch)
-		return switchErr
+		return switchErr == nil, switchErr
 	}
-	return nil
+	return false, nil
 }
 
 func (s *Service) ensureBranch(ctx context.Context, sidecarDir, branch string) error {
@@ -704,16 +849,55 @@ func (s *Service) ensureBranch(ctx context.Context, sidecarDir, branch string) e
 		if _, err := s.runner.Run(ctx, sidecarDir, "git", "switch", branch); err != nil {
 			return fmt.Errorf("switch sidecar branch %q: %w", branch, err)
 		}
+		if err := s.prepareBranchWorktree(ctx, sidecarDir, branch); err != nil {
+			return err
+		}
 		return nil
 	}
 	if s.git.RefExists(ctx, sidecarDir, "refs/remotes/origin/"+branch) {
 		if _, err := s.runner.Run(ctx, sidecarDir, "git", "switch", "--track", "origin/"+branch); err != nil {
 			return fmt.Errorf("track sidecar branch %q: %w", branch, err)
 		}
+		if err := s.prepareBranchWorktree(ctx, sidecarDir, branch); err != nil {
+			return err
+		}
 		return nil
 	}
-	if _, err := s.runner.Run(ctx, sidecarDir, "git", "switch", "-c", branch); err != nil {
+	if _, err := s.runner.Run(ctx, sidecarDir, "git", "switch", "--orphan", branch); err != nil {
 		return fmt.Errorf("create sidecar branch %q: %w", branch, err)
+	}
+	if _, err := s.runner.Run(ctx, sidecarDir, "git", "read-tree", "--empty"); err != nil {
+		return fmt.Errorf("clear sidecar branch %q index: %w", branch, err)
+	}
+	if err := clearSidecarWorktree(sidecarDir); err != nil {
+		return fmt.Errorf("clear sidecar branch %q worktree: %w", branch, err)
+	}
+	return nil
+}
+
+func (s *Service) prepareBranchWorktree(ctx context.Context, sidecarDir, branch string) error {
+	if !s.git.HasHead(ctx, sidecarDir) {
+		return nil
+	}
+	if err := s.git.ResetAndClean(ctx, sidecarDir); err != nil {
+		return fmt.Errorf("prepare sidecar branch %q worktree: %w", branch, err)
+	}
+	return nil
+}
+
+func clearSidecarWorktree(sidecarDir string) error {
+	entries, err := os.ReadDir(sidecarDir)
+	if err != nil {
+		return fmt.Errorf("read sidecar worktree %s: %w", sidecarDir, err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == ".git" {
+			continue
+		}
+		path := filepath.Join(sidecarDir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("clear sidecar worktree path %s: %w", path, err)
+		}
 	}
 	return nil
 }
@@ -755,9 +939,14 @@ func (s *Service) queueHookFailure(ctx context.Context, dir string, syncErr erro
 	store := state.New(filepath.Join(gitDir, stateDirName))
 	reason := syncErr.Error()
 	if gitexec.IsDeadline(syncErr) || strings.Contains(reason, "signal: killed") {
-		reason = "sync timed out"
+		reason = "sync timed out: " + reason
 	}
-	if err := store.Enqueue(state.Entry{Time: time.Now().UTC(), Reason: reason, MainSHA: mainSHA}); err != nil {
+	entry := state.Entry{Time: time.Now().UTC(), Reason: reason, MainSHA: mainSHA}
+	var namespaceErr namespaceSyncError
+	if errors.As(syncErr, &namespaceErr) {
+		entry.Namespace = namespaceErr.Namespace
+	}
+	if err := store.Enqueue(entry); err != nil {
 		return err
 	}
 	if err := store.AppendLog("queued sync: " + reason); err != nil {
@@ -824,16 +1013,13 @@ func validateExistingConfig(cfg config.Config, opts InitOptions) error {
 	if name != "" && !sidecarNameMatches(cfg.Sidecar, name) {
 		return fmt.Errorf("%s already exists with incompatible sidecar %q", config.Filename, cfg.Sidecar)
 	}
-	if opts.NoDirectory && cfg.Directory != "" {
-		return fmt.Errorf("%s already exists with incompatible directory", config.Filename)
-	}
-	if opts.DirectorySet {
-		directory, err := config.CleanDirectory(opts.Directory)
+	if opts.NamespaceSet {
+		namespaceName, err := config.CleanNamespace(opts.Namespace)
 		if err != nil {
 			return err
 		}
-		if directory != cfg.Directory {
-			return fmt.Errorf("%s already exists with incompatible directory", config.Filename)
+		if len(cfg.Namespaces) != 1 || cfg.Namespaces[0].Name != namespaceName {
+			return fmt.Errorf("%s already exists with incompatible namespace", config.Filename)
 		}
 	}
 	bootstrap := strings.TrimSpace(opts.Bootstrap)
@@ -844,7 +1030,7 @@ func validateExistingConfig(cfg config.Config, opts InitOptions) error {
 	if err != nil {
 		return err
 	}
-	if len(patterns) > 0 && !sameStrings(patterns, cfg.Patterns) {
+	if len(patterns) > 0 && (len(cfg.Namespaces) != 1 || !sameStrings(patterns, cfg.Namespaces[0].Patterns)) {
 		return fmt.Errorf("%s already exists with incompatible patterns", config.Filename)
 	}
 	return nil
@@ -894,32 +1080,16 @@ func resolveProjectPath(root, path string) (string, error) {
 	return filepath.ToSlash(filepath.Clean(rel)), nil
 }
 
-func pathMatchesPatterns(path string, patterns []string) bool {
-	for _, pattern := range patterns {
-		ok, err := doublestar.PathMatch(filepath.ToSlash(pattern), path)
-		if err == nil && ok {
-			return true
-		}
-	}
-	return false
-}
-
 func sidecarPath(root string) string {
 	return filepath.Join(root, DirName)
 }
 
-func sidecarStoragePath(root string, cfg config.Config) string {
-	if cfg.Directory == "" {
-		return sidecarPath(root)
-	}
-	return filepath.Join(sidecarPath(root), filepath.FromSlash(cfg.Directory))
+func sidecarStoragePath(root string, namespace string) string {
+	return filepath.Join(sidecarPath(root), filepath.FromSlash(namespace))
 }
 
-func sidecarFilePath(cfg config.Config, rel string) string {
-	if cfg.Directory == "" {
-		return rel
-	}
-	return filepath.ToSlash(filepath.Join(filepath.FromSlash(cfg.Directory), filepath.FromSlash(rel)))
+func sidecarFilePath(namespace string, rel string) string {
+	return filepath.ToSlash(filepath.Join(filepath.FromSlash(namespace), filepath.FromSlash(rel)))
 }
 
 func findMatchedFiles(ctx context.Context, root string, patterns []string) ([]string, error) {
@@ -929,15 +1099,12 @@ func findMatchedFiles(ctx context.Context, root string, patterns []string) ([]st
 	return matcher.FindContext(ctx, root, patterns)
 }
 
-func branchName(cfg config.Config, sourceBranch string) string {
-	if cfg.Directory == "" {
-		return sourceBranch
-	}
-	return cfg.Directory + "/" + config.DirectoryBranchSegment + "/" + sourceBranch
+func branchName(namespace, sourceBranch string) string {
+	return namespace + "/" + config.NamespaceBranchSegment + "/" + sourceBranch
 }
 
-// DefaultDirectory returns a safe sidecar namespace derived from a repo name.
-func DefaultDirectory(repoName string) string {
+// DefaultNamespace returns a safe sidecar namespace derived from a repo name.
+func DefaultNamespace(repoName string) string {
 	var b strings.Builder
 	lastDash := false
 	for _, r := range strings.TrimSpace(repoName) {
@@ -961,14 +1128,14 @@ func DefaultDirectory(repoName string) string {
 			}
 		}
 	}
-	directory := strings.Trim(b.String(), "-.")
-	if directory == "" {
+	namespace := strings.Trim(b.String(), "-.")
+	if namespace == "" {
 		return "project"
 	}
-	if _, err := config.CleanDirectory(directory); err != nil {
+	if _, err := config.CleanNamespace(namespace); err != nil {
 		return "project"
 	}
-	return directory
+	return namespace
 }
 
 func exists(path string) bool {

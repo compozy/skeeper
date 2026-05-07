@@ -37,17 +37,31 @@ func newSyncCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
 				_, err = fmt.Fprintln(stdout, "skeeper: no spec changes to sync")
 				return err
 			}
-			if result.Commit == "" {
-				_, err = fmt.Fprintf(stdout, "skeeper: synced %d specs to sidecar\n", result.ChangedFiles)
+			committedFiles := 0
+			for _, namespace := range result.Namespaces {
+				if namespace.Committed {
+					committedFiles += namespace.ChangedFiles
+				}
+			}
+			if _, err := fmt.Fprintf(stdout, "skeeper: synced %d specs to sidecar\n", committedFiles); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(
-				stdout,
-				"skeeper: synced %d specs to sidecar (%s)\n",
-				result.ChangedFiles,
-				result.Commit,
-			)
-			return err
+			for _, namespace := range result.Namespaces {
+				if !namespace.Committed {
+					continue
+				}
+				if _, err := fmt.Fprintf(
+					stdout,
+					"  %s -> %s: %d specs (%s)\n",
+					namespace.Name,
+					namespace.Branch,
+					namespace.ChangedFiles,
+					namespace.Commit,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Pull, "pull", false, "pull/rebase the sidecar branch before syncing")

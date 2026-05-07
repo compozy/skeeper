@@ -17,17 +17,23 @@ import (
 const (
 	// Filename is the committed project config file.
 	Filename = ".skeeper.yml"
-	// DirectoryBranchSegment separates a sidecar directory namespace from
-	// branch-specific sidecar refs.
-	DirectoryBranchSegment = "__branches__"
+	// NamespaceBranchSegment separates a sidecar namespace from branch-specific
+	// sidecar refs.
+	NamespaceBranchSegment = "__branches__"
 )
 
 // Config describes how a project mirrors spec files into its sidecar repo.
 type Config struct {
-	Sidecar   string   `yaml:"sidecar"`
-	Directory string   `yaml:"directory,omitempty"`
-	Bootstrap string   `yaml:"bootstrap,omitempty"`
-	Patterns  []string `yaml:"patterns"`
+	Sidecar    string      `yaml:"sidecar"`
+	Bootstrap  string      `yaml:"bootstrap,omitempty"`
+	Namespaces []Namespace `yaml:"namespaces"`
+}
+
+// Namespace routes a set of project files into one sidecar namespace.
+type Namespace struct {
+	Name     string   `yaml:"name"`
+	Patterns []string `yaml:"patterns"`
+	Exclude  []string `yaml:"exclude,omitempty"`
 }
 
 // DefaultPatterns returns the interactive init defaults.
@@ -116,25 +122,56 @@ func (c Config) Normalize() (Config, error) {
 	if strings.TrimSpace(c.Sidecar) == "" {
 		return Config{}, errors.New("sidecar is required")
 	}
-	directory, err := CleanDirectory(c.Directory)
+	namespaces, err := NormalizeNamespaces(c.Namespaces)
 	if err != nil {
 		return Config{}, err
 	}
-	patterns, err := NormalizePatterns(c.Patterns)
-	if err != nil {
-		return Config{}, err
+	if len(namespaces) == 0 {
+		return Config{}, errors.New("namespaces must contain at least one namespace")
 	}
-	if len(patterns) == 0 {
-		return Config{}, errors.New("patterns must contain at least one glob")
-	}
-	c.Directory = directory
-	c.Patterns = patterns
+	c.Namespaces = namespaces
 	return c, nil
+}
+
+// NormalizeNamespaces validates and canonicalizes namespace routing rules.
+func NormalizeNamespaces(namespaces []Namespace) ([]Namespace, error) {
+	normalized := make([]Namespace, 0, len(namespaces))
+	seen := make(map[string]struct{}, len(namespaces))
+	for i, namespace := range namespaces {
+		name, err := CleanNamespace(namespace.Name)
+		if err != nil {
+			return nil, fmt.Errorf("namespaces[%d].name: %w", i, err)
+		}
+		if name == "" {
+			return nil, fmt.Errorf("namespaces[%d].name is required", i)
+		}
+		if _, ok := seen[name]; ok {
+			return nil, fmt.Errorf("namespaces[%d].name duplicates %q", i, name)
+		}
+		seen[name] = struct{}{}
+		patterns, err := normalizePatternsField("patterns", namespace.Patterns)
+		if err != nil {
+			return nil, fmt.Errorf("namespaces[%d]: %w", i, err)
+		}
+		if len(patterns) == 0 {
+			return nil, fmt.Errorf("namespaces[%d].patterns must contain at least one glob", i)
+		}
+		exclude, err := normalizePatternsField("exclude", namespace.Exclude)
+		if err != nil {
+			return nil, fmt.Errorf("namespaces[%d]: %w", i, err)
+		}
+		normalized = append(normalized, Namespace{Name: name, Patterns: patterns, Exclude: exclude})
+	}
+	return normalized, nil
 }
 
 // NormalizePatterns validates and canonicalizes doublestar path globs while
 // preserving their order.
 func NormalizePatterns(patterns []string) ([]string, error) {
+	return normalizePatternsField("patterns", patterns)
+}
+
+func normalizePatternsField(field string, patterns []string) ([]string, error) {
 	normalized := make([]string, 0, len(patterns))
 	seen := make(map[string]struct{}, len(patterns))
 	for i, pattern := range patterns {
@@ -142,13 +179,13 @@ func NormalizePatterns(patterns []string) ([]string, error) {
 		cleaned = strings.ReplaceAll(cleaned, "\\", "/")
 		cleaned = strings.TrimPrefix(cleaned, "./")
 		if cleaned == "" {
-			return nil, fmt.Errorf("patterns[%d] is empty", i)
+			return nil, fmt.Errorf("%s[%d] is empty", field, i)
 		}
 		if !doublestar.ValidatePathPattern(cleaned) {
-			return nil, fmt.Errorf("patterns[%d] is invalid glob %q", i, pattern)
+			return nil, fmt.Errorf("%s[%d] is invalid glob %q", field, i, pattern)
 		}
 		if _, ok := seen[cleaned]; ok {
-			return nil, fmt.Errorf("patterns[%d] duplicates %q", i, cleaned)
+			return nil, fmt.Errorf("%s[%d] duplicates %q", field, i, cleaned)
 		}
 		seen[cleaned] = struct{}{}
 		normalized = append(normalized, cleaned)
@@ -156,45 +193,66 @@ func NormalizePatterns(patterns []string) ([]string, error) {
 	return normalized, nil
 }
 
-// CleanDirectory validates a sidecar directory namespace and returns its
-// canonical slash-separated form. The empty string is valid legacy behavior.
-func CleanDirectory(directory string) (string, error) {
-	trimmed := strings.TrimSpace(directory)
+// CleanNamespace validates a sidecar namespace and returns its canonical
+// slash-separated form.
+func CleanNamespace(namespace string) (string, error) {
+	trimmed := strings.TrimSpace(namespace)
 	if trimmed == "" {
 		return "", nil
 	}
 	if strings.Contains(trimmed, "\\") {
-		return "", errors.New("directory must use slash-separated path segments")
+		return "", errors.New("namespace must use slash-separated path segments")
 	}
 	if path.IsAbs(trimmed) || strings.HasPrefix(trimmed, "/") {
-		return "", errors.New("directory must be relative")
+		return "", errors.New("namespace must be relative")
 	}
 	if strings.HasPrefix(trimmed, "./") || strings.HasSuffix(trimmed, "/") ||
 		strings.Contains(trimmed, "//") {
-		return "", fmt.Errorf("directory %q is not a clean relative path", directory)
+		return "", fmt.Errorf("namespace %q is not a clean relative path", namespace)
 	}
 	cleaned := path.Clean(trimmed)
 	if cleaned != trimmed {
-		return "", fmt.Errorf("directory %q is not a clean relative path", directory)
+		return "", fmt.Errorf("namespace %q is not a clean relative path", namespace)
 	}
 	for segment := range strings.SplitSeq(cleaned, "/") {
 		if segment == "." || segment == ".." {
-			return "", fmt.Errorf("directory contains invalid segment %q", segment)
+			return "", fmt.Errorf("namespace contains invalid segment %q", segment)
 		}
 		if strings.HasPrefix(segment, ".") {
-			return "", fmt.Errorf("directory segment %q cannot start with dot", segment)
+			return "", fmt.Errorf("namespace segment %q cannot start with dot", segment)
 		}
-		if segment == DirectoryBranchSegment {
-			return "", fmt.Errorf("directory segment %q is reserved", DirectoryBranchSegment)
+		if segment == NamespaceBranchSegment {
+			return "", fmt.Errorf("namespace segment %q is reserved", NamespaceBranchSegment)
 		}
 		if reservedDirectorySegment(segment) {
-			return "", fmt.Errorf("directory segment %q is reserved for Git internals", segment)
+			return "", fmt.Errorf("namespace segment %q is reserved for Git internals", segment)
 		}
 		if !safeDirectorySegment(segment) {
-			return "", fmt.Errorf("directory segment %q contains unsupported characters", segment)
+			return "", fmt.Errorf("namespace segment %q contains unsupported characters", segment)
 		}
 	}
 	return cleaned, nil
+}
+
+// Owns reports whether path belongs to namespace after applying excludes.
+func (n Namespace) Owns(path string) bool {
+	return n.Includes(path) && !matchesAny(path, n.Exclude)
+}
+
+// Includes reports whether path matches namespace's include patterns.
+func (n Namespace) Includes(path string) bool {
+	return matchesAny(path, n.Patterns)
+}
+
+func matchesAny(filePath string, patterns []string) bool {
+	normalizedPath := filepath.ToSlash(filePath)
+	for _, pattern := range patterns {
+		ok, err := doublestar.PathMatch(filepath.ToSlash(pattern), normalizedPath)
+		if err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
 
 func reservedDirectorySegment(segment string) bool {

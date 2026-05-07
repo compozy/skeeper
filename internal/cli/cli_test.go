@@ -55,7 +55,7 @@ func TestExecute_HelpListsSidecarCommands(t *testing.T) {
 	})
 }
 
-func TestExecute_InitNoDirectoryWarnsAndOmitsDirectory(t *testing.T) {
+func TestExecute_InitWritesNamespace(t *testing.T) {
 	root := t.TempDir()
 	remote := filepath.Join(t.TempDir(), "shared-specs.git")
 	git(t, "", "init", "--bare", "--initial-branch=main", remote)
@@ -68,7 +68,7 @@ func TestExecute_InitNoDirectoryWarnsAndOmitsDirectory(t *testing.T) {
 		[]string{
 			"init",
 			"--sidecar", remote,
-			"--no-directory",
+			"--namespace", "skills",
 			"--patterns", "**/SPEC.md",
 		},
 		&stdout,
@@ -77,15 +77,12 @@ func TestExecute_InitNoDirectoryWarnsAndOmitsDirectory(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d (stderr=%q)", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "no directory namespace configured") {
-		t.Fatalf("expected no-directory warning, got %q", stderr.String())
-	}
 	cfg, err := config.Load(root)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if cfg.Directory != "" {
-		t.Fatalf("expected omitted directory, got %q", cfg.Directory)
+	if len(cfg.Namespaces) != 1 || cfg.Namespaces[0].Name != "skills" {
+		t.Fatalf("expected skills namespace, got %#v", cfg.Namespaces)
 	}
 }
 
@@ -116,7 +113,7 @@ func TestExecute_InitRejectsMutuallyExclusiveSidecarFlags(t *testing.T) {
 	}
 }
 
-func TestExecute_InitRejectsMutuallyExclusiveDirectoryFlags(t *testing.T) {
+func TestExecute_InitRejectsEmptyNamespaceFlag(t *testing.T) {
 	root := t.TempDir()
 	remote := filepath.Join(t.TempDir(), "shared-specs.git")
 	git(t, "", "init", "--bare", "--initial-branch=main", remote)
@@ -129,35 +126,7 @@ func TestExecute_InitRejectsMutuallyExclusiveDirectoryFlags(t *testing.T) {
 		[]string{
 			"init",
 			"--sidecar", remote,
-			"--directory", "project",
-			"--no-directory",
-			"--patterns", "**/SPEC.md",
-		},
-		&stdout,
-		&stderr,
-	)
-	if code == 0 {
-		t.Fatalf("expected non-zero exit code, stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(root, config.Filename)); !os.IsNotExist(err) {
-		t.Fatalf("expected config not to be written, stat err=%v", err)
-	}
-}
-
-func TestExecute_InitRejectsEmptyDirectoryFlag(t *testing.T) {
-	root := t.TempDir()
-	remote := filepath.Join(t.TempDir(), "shared-specs.git")
-	git(t, "", "init", "--bare", "--initial-branch=main", remote)
-	git(t, root, "init", "-b", "main")
-	t.Chdir(root)
-
-	var stdout, stderr bytes.Buffer
-	code := cli.Execute(
-		context.Background(),
-		[]string{
-			"init",
-			"--sidecar", remote,
-			"--directory", "",
+			"--namespace", "",
 			"--patterns", "**/SPEC.md",
 		},
 		&stdout,

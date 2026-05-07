@@ -21,16 +21,15 @@ const (
 )
 
 type formState struct {
-	mode               string
-	sidecarName        string
-	sidecarURL         string
-	visibility         string
-	directory          string
-	confirmNoDirectory bool
-	bootstrap          string
-	defaultPatterns    []string
-	syncExtraContext   bool
-	extraPatterns      string
+	mode             string
+	sidecarName      string
+	sidecarURL       string
+	visibility       string
+	namespace        string
+	bootstrap        string
+	defaultPatterns  []string
+	syncExtraContext bool
+	extraPatterns    string
 }
 
 // Run opens the init form and returns the selected options.
@@ -60,7 +59,7 @@ func newFormState(defaults sidecar.InitDefaults) formState {
 		mode:            initModeCreate,
 		sidecarName:     defaults.SidecarName,
 		visibility:      visibility,
-		directory:       defaults.Directory,
+		namespace:       defaults.Namespace,
 		defaultPatterns: append([]string(nil), defaults.Patterns...),
 	}
 }
@@ -72,7 +71,6 @@ func newForm(state *formState) *huh.Form {
 		existingSidecarGroup(state),
 		projectSettingsGroup(state),
 		extraContextGroup(state),
-		noDirectoryGroup(state),
 	)
 }
 
@@ -127,10 +125,10 @@ func existingSidecarGroup(state *formState) *huh.Group {
 func projectSettingsGroup(state *formState) *huh.Group {
 	return huh.NewGroup(
 		huh.NewInput().
-			Title("Directory").
+			Title("Namespace").
 			Placeholder("project").
-			Value(&state.directory).
-			Validate(validateDirectory),
+			Value(&state.namespace).
+			Validate(validateNamespace),
 		huh.NewInput().
 			Title("Bootstrap").
 			Placeholder("brew install compozy/skeeper/skeeper").
@@ -158,27 +156,11 @@ func extraContextGroup(state *formState) *huh.Group {
 	})
 }
 
-func noDirectoryGroup(state *formState) *huh.Group {
-	return huh.NewGroup(
-		huh.NewConfirm().
-			Title("Continue without a directory namespace?").
-			Description("Shared sidecars can collide at root and push to the same branch.").
-			Affirmative("Continue").
-			Negative("Go back").
-			Value(&state.confirmNoDirectory).
-			Validate(func(confirmed bool) error {
-				if !confirmed {
-					return errors.New("confirm no-directory or enter a directory namespace")
-				}
-				return nil
-			}),
-	).WithHideFunc(func() bool {
-		return strings.TrimSpace(state.directory) != ""
-	})
-}
-
-func validateDirectory(value string) error {
-	_, err := config.CleanDirectory(value)
+func validateNamespace(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.New("namespace is required")
+	}
+	_, err := config.CleanNamespace(value)
 	return err
 }
 
@@ -191,17 +173,15 @@ func validateExtraPatterns(value string) error {
 }
 
 func (s formState) options() (sidecar.InitOptions, error) {
-	directory := strings.TrimSpace(s.directory)
-	if directory == "" && !s.confirmNoDirectory {
-		return sidecar.InitOptions{}, errors.New("confirm no-directory or enter a directory namespace")
+	namespace := strings.TrimSpace(s.namespace)
+	cleaned, err := config.CleanNamespace(namespace)
+	if err != nil {
+		return sidecar.InitOptions{}, err
 	}
-	if directory != "" {
-		cleaned, err := config.CleanDirectory(directory)
-		if err != nil {
-			return sidecar.InitOptions{}, err
-		}
-		directory = cleaned
+	if cleaned == "" {
+		return sidecar.InitOptions{}, errors.New("namespace is required")
 	}
+	namespace = cleaned
 	patterns, err := config.NormalizePatterns(s.defaultPatterns)
 	if err != nil {
 		return sidecar.InitOptions{}, err
@@ -221,9 +201,8 @@ func (s formState) options() (sidecar.InitOptions, error) {
 		patterns = appendUniquePatterns(patterns, extraPatterns)
 	}
 	opts := sidecar.InitOptions{
-		Directory:    directory,
-		DirectorySet: directory != "",
-		NoDirectory:  directory == "",
+		Namespace:    namespace,
+		NamespaceSet: true,
 		Bootstrap:    strings.TrimSpace(s.bootstrap),
 		Patterns:     patterns,
 	}

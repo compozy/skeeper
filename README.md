@@ -25,9 +25,9 @@ Specs and code want to live together. Spec files (`SPEC.md`, `docs/specs/*`, `.c
 ## ✨ Highlights
 
 - **One sidecar repo, full Git history.** Specs version normally — `git log`, `git blame`, branches, PRs — without touching your main repo's diff.
-- **Shared sidecars without collisions.** `directory` namespaces each source repo inside one sidecar remote, including both stored paths and pushed branches.
+- **Shared sidecars without collisions.** Named namespaces isolate stored paths and pushed branches inside one sidecar remote.
 - **Edit specs where they belong.** Spec files stay next to the code they describe. `skeeper` mirrors them into `.skeeper/` for you.
-- **A post-commit hook that never breaks your commit.** 750 ms foreground budget; on failure, the sync queues locally and retries on the next manual `skeeper sync`.
+- **A post-commit hook that never breaks your commit.** 750 ms foreground budget per namespace; on failure, the sync queues locally and retries on the next manual `skeeper sync`.
 - **Branch-aware mirroring.** Sidecar branches track main-tree branches, so feature work and `main` stay isolated.
 - **Fresh-clone hydration.** `skeeper hydrate` restores matched specs into a new clone so teammates start with full context.
 - **Glob-based pattern matching.** Doublestar globs (`**/SPEC.md`, `docs/specs/**`, `.claude/plans/**`) — match specs the way you actually organize them.
@@ -77,22 +77,22 @@ docker run --rm -v "$PWD:/workspace" -w /workspace skeeper:dev status
 
 ## 🔄 How It Works
 
-Spec files live at their natural paths next to code. Your main repo's `.gitignore` lists those patterns plus `.skeeper/`, so neither the specs nor the sidecar clone ever appear in a main-repo diff.
+Spec files live at their natural paths next to code. Your main repo's `.gitignore` lists the effective namespace patterns plus `.skeeper/`, so neither owned specs nor the sidecar clone ever appear in a main-repo diff.
 
-On every `git commit`, the managed post-commit hook runs `skeeper sync --hook` with a 750 ms foreground budget. `skeeper` matches files against your patterns, copies them into `.skeeper/`, commits with a reference to the main commit SHA, and pushes to the sidecar remote.
+On every `git commit`, the managed post-commit hook runs `skeeper sync --hook` with a 750 ms foreground budget per namespace. `skeeper` matches files against namespace patterns, copies them into `.skeeper/`, commits with a reference to the main commit SHA, and pushes to the sidecar remote.
 
-When `directory` is configured, files are stored under that namespace in the sidecar and branches are pushed as `<directory>/__branches__/<source-branch>`. For example, `directory: skeeper` on source branch `main` stores `src/auth/SPEC.md` as `skeeper/src/auth/SPEC.md` and pushes sidecar branch `skeeper/__branches__/main`.
+Each namespace stores files under `<namespace>/<path>` in the sidecar and pushes branch `<namespace>/__branches__/<source-branch>`. For example, namespace `skills` on source branch `main` stores `skills/review.md` as `skills/skills/review.md` and pushes sidecar branch `skills/__branches__/main`.
 
-If anything fails — network, auth, push rejection, timeout — `skeeper` writes a retry record to `.git/skeeper/queue.json`, appends a one-line audit entry to `.git/skeeper/sync.log`, and exits 0 so your `git commit` always succeeds. Run `skeeper sync` later to drain the queue.
+If anything fails — network, auth, push rejection, timeout — `skeeper` writes a retry record to `.git/skeeper/queue.json` with the failing namespace when one is known, appends a one-line audit entry to `.git/skeeper/sync.log`, and exits 0 so your `git commit` always succeeds. Run `skeeper sync` later to drain the queue.
 
 ```mermaid
 flowchart LR
     A[Developer<br/>git commit] --> B[post-commit hook<br/>skeeper sync --hook]
-    B --> C{Sync within<br/>750 ms?}
+    B --> C{Namespace sync within<br/>750 ms?}
     C -- yes --> D[Copy matched specs<br/>into .skeeper/]
     D --> E[git commit<br/>in sidecar]
     E --> F[git push<br/>to sidecar remote]
-    C -- no / error --> G[Write retry record<br/>.git/skeeper/queue.json]
+    C -- no / error --> G[Write namespace retry record<br/>.git/skeeper/queue.json]
     G --> H[Hook exits 0<br/>main commit succeeds]
     H -. later .-> I[skeeper sync<br/>drains queue]
     I --> D
@@ -106,15 +106,20 @@ flowchart LR
 # Required: sidecar repository URL
 sidecar: git@github.com:user/myproject-specs.git
 
-# Recommended: namespace for this source repo inside a shared sidecar
-directory: myproject
+# Required: namespaces route files into sidecar paths and branches
+namespaces:
+  - name: skills
+    patterns:
+      - "skills/*.md"
 
-# Required: doublestar globs that select spec files
-patterns:
-  - "**/SPEC.md"
-  - "docs/specs/**"
-  - ".claude/plans/**"
-  - "**/*.spec.md"
+  - name: myproject
+    patterns:
+      - "**/SPEC.md"
+      - "docs/specs/**"
+      - ".claude/plans/**"
+      - "**/*.spec.md"
+    exclude:
+      - "skills/*.md"
 
 # Optional: install one-liner shown to teammates after `skeeper hydrate`
 bootstrap: brew tap compozy/compozy && brew install --cask skeeper
@@ -122,9 +127,9 @@ bootstrap: brew tap compozy/compozy && brew install --cask skeeper
 
 Unknown keys are rejected — config errors fail loud, not silently.
 
-`directory` is strongly recommended for every new project and is written by `skeeper init` by default. It lets multiple source repos safely use one sidecar repository: each repo writes to its own sidecar subdirectory and its own namespaced sidecar branches. If `directory` is omitted, `skeeper` uses the legacy behavior: files are mirrored at the sidecar root and the sidecar branch is exactly the source branch. That legacy mode is useful for dedicated sidecars, but it is unsafe for shared sidecars because different repos can delete each other's matched files and compete for the same branch.
+Every namespace needs a `name` and at least one `patterns` glob. `exclude` removes ownership from that namespace; if another namespace owns the excluded files, they stay tracked there. A file owned by more than one namespace is a configuration error because hidden precedence would make deletes unsafe.
 
-There is no automatic migration from root storage to a new `directory`. Adding `directory` starts using a new path namespace and branch namespace.
+`skeeper init` writes one namespace by default. Add more namespaces by editing `.skeeper.yml`.
 
 Local-only state lives under `.git/skeeper/` (already gitignored by Git's hooks directory):
 
@@ -149,13 +154,13 @@ In a Git repo where you want to track specs:
 skeeper init
 ```
 
-Interactive by default — opens a terminal form for the sidecar mode, repository name or URL, `directory`, bootstrap command, and optional extra context globs. The interactive flow always includes the default spec globs (`**/SPEC.md`, `docs/specs/**`, `.claude/plans/**`, and `**/*.spec.md`); the extra context prompt starts empty and is only for additional folders or files you explicitly want in the sidecar. Or pass values as flags:
+Interactive by default — opens a terminal form for the sidecar mode, repository name or URL, namespace, bootstrap command, and optional extra context globs. The interactive flow always includes the default spec globs (`**/SPEC.md`, `docs/specs/**`, `.claude/plans/**`, and `**/*.spec.md`) in the initial namespace; the extra context prompt starts empty and is only for additional folders or files you explicitly want in that namespace. Or pass values as flags:
 
 ```bash
 skeeper init \
   --sidecar-name myproject-specs \
   --visibility private \
-  --directory myproject \
+  --namespace myproject \
   --patterns "**/SPEC.md" \
   --patterns ".claude/plans/**"
 ```
@@ -165,11 +170,11 @@ To reuse one shared sidecar remote across multiple source repos:
 ```bash
 skeeper init \
   --sidecar git@github.com:user/shared-specs.git \
-  --directory myproject \
+  --namespace myproject \
   --patterns "**/SPEC.md"
 ```
 
-`skeeper init` creates the GitHub repo with `gh repo create` unless `--sidecar` points to an existing remote. It clones the sidecar into `.skeeper/`, writes `.skeeper.yml`, updates `.gitignore`, and installs the post-commit hook. New init runs default `directory` to the source repo name; pass `--no-directory` only when you intentionally want legacy root behavior.
+`skeeper init` creates the GitHub repo with `gh repo create` unless `--sidecar` points to an existing remote. It clones the sidecar into `.skeeper/`, writes `.skeeper.yml`, updates `.gitignore`, and installs the post-commit hook. New init defaults the namespace to the source repo name.
 
 When using flags, repeated `--patterns` values are the complete pattern set written to `.skeeper.yml`; they do not append to the interactive defaults.
 
@@ -211,11 +216,11 @@ skeeper sync --pull    # rebase the sidecar branch first — useful when teammat
 
 ## 🧰 How Sync Works
 
-The post-commit hook is a _managed block_ in `.git/hooks/post-commit`, installed idempotently. It runs `skeeper sync --hook` with a 750 ms foreground budget so your `git commit` stays snappy even on a slow network.
+The post-commit hook is a _managed block_ in `.git/hooks/post-commit`, installed idempotently. It runs `skeeper sync --hook` with a 750 ms foreground budget per namespace so your `git commit` stays bounded even on a slow network.
 
-On the success path, `skeeper` matches files with doublestar globs, copies them into `.skeeper/`, then runs `git add`, `git commit`, and `git push` against the sidecar remote. With `directory`, the copy destination is `.skeeper/<directory>/<path>` and the push target is `<directory>/__branches__/<source-branch>`. Sidecar commits reference the main-repo SHA so you can correlate spec changes back to the code change that triggered them.
+On the success path, `skeeper` matches files with doublestar globs, copies them into `.skeeper/`, then runs `git add`, `git commit`, and `git push` against the sidecar remote. Each namespace copies to `.skeeper/<namespace>/<path>` and pushes `<namespace>/__branches__/<source-branch>`. Sidecar commits reference the main-repo SHA so you can correlate spec changes back to the code change that triggered them.
 
-On the failure path — timeout, auth failure, network failure, or push rejection — `skeeper` writes a retry record to `.git/skeeper/queue.json`, appends to `.git/skeeper/sync.log`, prints a one-line note, and the hook exits 0. The next `skeeper sync` drains the queue before running a normal sync. Use `skeeper sync --pull` when a teammate pushed sidecar updates between your commits; it fetches and rebases before pushing.
+On the failure path — timeout, auth failure, network failure, or push rejection — `skeeper` writes a retry record to `.git/skeeper/queue.json` with the failing namespace when one is known, appends to `.git/skeeper/sync.log`, prints a one-line note, and the hook exits 0. The next `skeeper sync` drains the queue before running a normal sync. Use `skeeper sync --pull` when a teammate pushed sidecar updates between your commits; it fetches and rebases before pushing.
 
 This design has two consequences worth knowing:
 
@@ -236,12 +241,11 @@ skeeper init [flags]
 | `--sidecar`      |           | Existing sidecar repository URL                              |
 | `--sidecar-name` |           | GitHub sidecar repository name or `OWNER/REPO`               |
 | `--visibility`   | `private` | GitHub visibility: `private`, `public`, or `internal`        |
-| `--directory`    | repo slug | Sidecar directory namespace for this source repo             |
-| `--no-directory` | `false`   | Omit namespace and use legacy root behavior                  |
+| `--namespace`    | repo slug | Initial sidecar namespace for this source repo               |
 | `--bootstrap`    |           | Optional install command stored in `.skeeper.yml`            |
 | `--patterns`     |           | Complete spec glob pattern set; repeat for multiple patterns |
 
-When run interactively, `init` opens a terminal form. It includes the default spec globs automatically, then asks whether to add extra context globs such as `AGENTS.md`, `CLAUDE.md`, or `.codex/plans/**`. It runs `gh repo create` for `--sidecar-name` or the create mode, but skips GitHub creation when `--sidecar` is provided. `--sidecar` and `--sidecar-name` are mutually exclusive; `--directory` and `--no-directory` are mutually exclusive.
+When run interactively, `init` opens a terminal form. It includes the default spec globs automatically, then asks whether to add extra context globs such as `AGENTS.md`, `CLAUDE.md`, or `.codex/plans/**`. It runs `gh repo create` for `--sidecar-name` or the create mode, but skips GitHub creation when `--sidecar` is provided. `--sidecar` and `--sidecar-name` are mutually exclusive.
 
 </details>
 
@@ -263,10 +267,10 @@ Use after a fresh clone of the main repo. `hydrate` clones the sidecar into `.sk
 skeeper sync [flags]
 ```
 
-| Flag     | Default | Description                                                            |
-| -------- | ------- | ---------------------------------------------------------------------- |
-| `--pull` | `false` | Pull and rebase the sidecar branch before syncing                      |
-| `--hook` | `false` | Run in post-commit hook mode: 750 ms foreground budget, always exits 0 |
+| Flag     | Default | Description                                                                          |
+| -------- | ------- | ------------------------------------------------------------------------------------ |
+| `--pull` | `false` | Pull and rebase the sidecar branch before syncing                                    |
+| `--hook` | `false` | Run in post-commit hook mode: 750 ms foreground budget per namespace, always exits 0 |
 
 Drains queued retries from `.git/skeeper/queue.json`, then mirrors spec files into `.skeeper/`, commits, and pushes. Use `--pull` when teammates may have pushed sidecar updates between your commits. `--hook` is what the installed post-commit hook calls — you rarely run it manually.
 
@@ -279,7 +283,7 @@ Drains queued retries from `.git/skeeper/queue.json`, then mirrors spec files in
 skeeper status
 ```
 
-Prints the sidecar URL, current source branch, directory namespace when configured, sidecar branch, last sync commit and age, remote URL, count of tracked spec files, and count of pending queued syncs. No flags.
+Prints the sidecar URL, current source branch, one status block per namespace, last sync commit and age, remote state, tracked file counts, and pending queued syncs. No flags.
 
 </details>
 
@@ -290,7 +294,7 @@ Prints the sidecar URL, current source branch, directory namespace when configur
 skeeper log <path>
 ```
 
-Runs `git log` against the sidecar for one spec file. The path is relative to the main repo root, e.g. `skeeper log src/auth/SPEC.md`. When `directory` is configured, `skeeper` resolves that path to `<directory>/src/auth/SPEC.md` inside the sidecar.
+Runs `git log` against the sidecar for one spec file. The path is relative to the main repo root, e.g. `skeeper log src/auth/SPEC.md`. `skeeper` resolves the current owning namespace and reads `<namespace>/<path>` inside that namespace branch.
 
 </details>
 
