@@ -76,10 +76,6 @@ docker run --rm -v "$PWD:/workspace" -w /workspace skeeper:dev status
 - `git` on `PATH`
 - `gh` (GitHub CLI) **only when `skeeper init` creates a new sidecar** — existing sidecars can be reused with `--sidecar`. Day-to-day commands need only `git`.
 
-## 🤖 Official Agent Skill
-
-`skeeper` ships its own first-party agent skill at [`skills/skeeper-project/SKILL.md`](skills/skeeper-project/SKILL.md). LLM agents working in this repository should load it before reading or modifying code — it captures the workflow, project rules, and verification gates that aren't obvious from the source alone, and points to `references/domain-map.md` and `references/repo-contract.md` for package boundaries and change rules.
-
 ## 🔄 How It Works
 
 Spec files live at their natural paths next to code. Your main repo's `.gitignore` lists the effective namespace patterns plus `.skeeper/`, so neither owned specs nor the sidecar clone ever appear in a main-repo diff.
