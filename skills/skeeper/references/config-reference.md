@@ -103,10 +103,12 @@ By default, every namespace honors:
 
 These files are written under `.git/skeeper/` and are never committed:
 
-| File               | Purpose                                | Cleared by                                          |
-| ------------------ | -------------------------------------- | --------------------------------------------------- |
-| `transaction.json` | Resumable mutating operation and phase | successful `skeeper sync` or `skeeper repair abort` |
-| `bypass.json`      | Latest audited strict-hook bypass      | next successful `skeeper sync`                      |
+| File               | Purpose                                                     | Cleared by                                              |
+| ------------------ | ----------------------------------------------------------- | ------------------------------------------------------- |
+| `transaction.json` | Resumable mutating operation and phase                      | successful `skeeper sync` or `skeeper repair abort`     |
+| `bypass.json`      | Latest audited strict-hook bypass                           | next successful `skeeper sync`                          |
+| `hydration.json`   | Locked sidecar blobs used for merge-aware hydrate/reconcile | refreshed by `skeeper hydrate` and reconciliation flows |
+| `rescue/<id>/`     | Files moved aside before prune or overwrite operations      | manually with `skeeper rescue restore` or local cleanup |
 
 ## Validation summary
 

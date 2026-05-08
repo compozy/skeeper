@@ -1,6 +1,6 @@
 ---
 name: skeeper
-description: Explains how to use skeeper to keep spec artifacts (SPEC.md, ADRs, RFCs, plan/PRD/TechSpec markdown, custom globs) next to the code they describe without polluting main-repo history. Covers the strict pre-commit/pre-merge-commit/pre-push hooks, the tracked skeeper.lock file, namespaces, the adopt/untrack/pattern/repair/fsck/verify commands, the SKEEPER_SKIP audited bypass, and the official GitHub Action. Use when a user asks how to set up skeeper, configure a sidecar, sync or verify a lockfile, recover from a failed sync, audit a bypass, or wire skeeper into CI. Do not use for general Git hook questions, repos that have no .skeeper.yml and no intent to add one, or for editing skeeper's own internals.
+description: Explains how to use skeeper to keep spec artifacts (SPEC.md, ADRs, RFCs, plan/PRD/TechSpec markdown, custom globs) next to the code they describe without polluting main-repo history. Covers strict hooks, the tracked skeeper.lock file, namespaces, sync/verify/fsck, safe drift workflows with diff/hydrate/reconcile/rescue/update, adopt/untrack/pattern, repair, SKEEPER_SKIP, and the GitHub Action. Use when setting up skeeper, configuring a sidecar, syncing/verifying a lockfile, recovering drift or failed syncs, auditing bypasses, or wiring CI. Do not use for general Git hook questions, repos with no .skeeper.yml and no intent to add one, or editing skeeper internals.
 ---
 
 # Skeeper Reference Guide
@@ -12,6 +12,7 @@ Comprehensive reference for the `skeeper` CLI: a Go binary that mirrors spec art
 - **Lockfile-backed reliability.** `skeeper.lock` is committed to the main repo and pins each main commit to exact sidecar commits per namespace, with content digests, file counts, and byte counts.
 - **Strict managed hooks.** `pre-commit` and `pre-merge-commit` mirror staged content, push the sidecar, write `skeeper.lock`, and stage it before Git creates the main commit. `pre-push` re-verifies the lock against the sidecar remote.
 - **Namespaces in shared sidecars.** Many projects can share one sidecar Git remote without colliding because each project owns a namespace prefix and uses branch-aware refs of the form `<namespace>/__branches__/<source-branch>`.
+- **Safe drift handling.** `diff`, `hydrate`, `reconcile`, `rescue`, and `update` protect local managed documents: Skeeper reports drift first, fails closed before overwrites, and preserves pruned files under `.git/skeeper/rescue/`.
 - **Single-binary, local-first.** Skeeper shells out to `git` (and `gh` only when `skeeper init` creates a brand-new sidecar repo). Every operation is debuggable with the same Git commands you already know.
 
 ## Mental Model: Four Invariants
@@ -52,26 +53,31 @@ If the working tree already contains specs that should be sidecar-managed, run `
 
 ## Command Map
 
-| Command                             | Purpose                                                                                      | Read-only?         |
-| ----------------------------------- | -------------------------------------------------------------------------------------------- | ------------------ |
-| `skeeper init`                      | Interactively bootstrap `.skeeper.yml`, the sidecar repo, and the managed `.gitignore` block | no                 |
-| `skeeper hydrate`                   | Restore spec files from the sidecar commits recorded in `skeeper.lock`                       | yes (writes specs) |
-| `skeeper sync`                      | Mirror current specs to the sidecar and stage `skeeper.lock`                                 | no                 |
-| `skeeper adopt <path-or-glob>...`   | Move main-tracked specs under sidecar coverage                                               | no                 |
-| `skeeper untrack <path-or-glob>...` | Reverse adoption: stop tracking specs in the main repo                                       | no                 |
-| `skeeper pattern test <glob>`       | Preview which working-tree files a glob would match                                          | yes                |
-| `skeeper pattern add <glob>`        | Add a glob to a namespace and update `.skeeper.yml` and `.gitignore`                         | no                 |
-| `skeeper status`                    | Show sidecar URL, branch, lock state, namespace digests, repair, bypass                      | yes                |
-| `skeeper log <path>`                | Show sidecar history for a single spec file (default: locked commit; `--latest` reads tip)   | yes                |
-| `skeeper fsck`                      | Compare working-tree specs against `skeeper.lock`                                            | yes                |
-| `skeeper verify`                    | Validate `skeeper.lock` against the sidecar remote                                           | yes                |
-| `skeeper hooks install`             | Install or refresh the strict hooks, `.gitattributes`, and merge driver                      | no                 |
-| `skeeper hooks check`               | Validate that managed hook blocks and the merge driver are wired correctly                   | yes                |
-| `skeeper merge-driver`              | Regenerate `skeeper.lock` during Git merges (called by `.gitattributes`)                     | no                 |
-| `skeeper repair status`             | Show the active transaction and any pending bypass                                           | yes                |
-| `skeeper repair resume`             | Re-run the recorded plan after a transient failure                                           | no                 |
-| `skeeper repair abort`              | Clear the transaction (only safe before main-index mutation)                                 | no                 |
-| `skeeper version`                   | Print build metadata                                                                         | yes                |
+| Command                             | Purpose                                                                                      | Read-only? |
+| ----------------------------------- | -------------------------------------------------------------------------------------------- | ---------- |
+| `skeeper init`                      | Interactively bootstrap `.skeeper.yml`, the sidecar repo, and the managed `.gitignore` block | no         |
+| `skeeper hydrate`                   | Restore spec files from the sidecar commits recorded in `skeeper.lock`                       | no         |
+| `skeeper sync`                      | Mirror current specs to the sidecar and stage `skeeper.lock`                                 | no         |
+| `skeeper adopt <path-or-glob>...`   | Move main-tracked specs under sidecar coverage                                               | no         |
+| `skeeper untrack <path-or-glob>...` | Reverse adoption: stop tracking specs in the main repo                                       | no         |
+| `skeeper pattern test <glob>`       | Preview which working-tree files a glob would match                                          | yes        |
+| `skeeper pattern add <glob>`        | Add a glob to a namespace and update `.skeeper.yml` and `.gitignore`                         | no         |
+| `skeeper status`                    | Show sidecar URL, branch, lock state, namespace digests, repair, bypass                      | yes        |
+| `skeeper log <path>`                | Show sidecar history for a single spec file (default: locked commit; `--latest` reads tip)   | yes        |
+| `skeeper fsck`                      | Compare working-tree specs against `skeeper.lock`                                            | yes        |
+| `skeeper diff`                      | List path-level drift classes such as local-only, missing, modified, and conflict            | yes        |
+| `skeeper reconcile`                 | Resolve drift explicitly by adopting, pruning to rescue, merging, or choosing ours/theirs    | no         |
+| `skeeper verify`                    | Validate `skeeper.lock` against the sidecar remote                                           | yes        |
+| `skeeper hooks install`             | Install or refresh the strict hooks, `.gitattributes`, and merge driver                      | no         |
+| `skeeper hooks check`               | Validate that managed hook blocks and the merge driver are wired correctly                   | yes        |
+| `skeeper merge-driver`              | Regenerate `skeeper.lock` during Git merges (called by `.gitattributes`)                     | no         |
+| `skeeper rescue list`               | List rescue manifests for files moved aside before prune or overwrite                        | yes        |
+| `skeeper rescue restore <id>`       | Restore all or selected files from a rescue manifest                                         | no         |
+| `skeeper update`                    | Agent-friendly update workflow: fast-forward, verify, hydrate, fsck, hooks                   | no         |
+| `skeeper repair status`             | Show the active transaction and any pending bypass                                           | yes        |
+| `skeeper repair resume`             | Re-run the recorded plan after a transient failure                                           | no         |
+| `skeeper repair abort`              | Clear the transaction (only safe before main-index mutation)                                 | no         |
+| `skeeper version`                   | Print build metadata                                                                         | yes        |
 
 `--json` produces deterministic machine-readable output on every command marked above. `--dry-run` is supported on every mutating command. `--force` overrides the broad-plan guardrails declared under `settings.guardrails`.
 
@@ -138,9 +144,10 @@ git commit -m "chore: bootstrap skeeper"
 skeeper init --sidecar git@github.com:user/shared-specs.git \
   --namespace project \
   --patterns "**/SPEC.md"
-skeeper hooks install
 skeeper hydrate
 ```
+
+`skeeper init` installs or refreshes the managed hooks and merge driver. Run `skeeper hooks install` explicitly when upgrading an older clone or repairing hook drift.
 
 ### Adopt files already in the main repo
 
@@ -161,6 +168,28 @@ skeeper repair resume
 # or, only before main-index mutation:
 skeeper repair abort
 ```
+
+### Inspect and resolve local drift
+
+```bash
+skeeper diff --modified
+skeeper hydrate --dry-run
+skeeper reconcile --adopt-local
+# or preserve local-only files before restoring locked content:
+skeeper reconcile --prune-local
+skeeper rescue list
+```
+
+Use `reconcile --adopt-local` when local edits are the intended spec state. Use `reconcile --prune-local` when local-only files should be preserved in `.git/skeeper/rescue/<id>/` before restoring the locked sidecar content. Use `--merge`, `--ours`, or `--theirs` only when that conflict policy is explicit.
+
+### Update a fresh clone or agent worktree
+
+```bash
+skeeper update
+skeeper update --reconcile keep-local
+```
+
+`update` is the high-level workflow for agents and fresh clones: it fetches and fast-forwards when safe, verifies `skeeper.lock`, hydrates managed files, runs `fsck`, and validates hooks.
 
 ### Resolve a `skeeper.lock` merge conflict
 
@@ -192,7 +221,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: compozy/skeeper@v0.2.0
+      - uses: compozy/skeeper@v0.2.1
         with:
           args: |
             verify
@@ -225,6 +254,7 @@ Secrets are always masked through `::add-mask::` before configuration.
 6. **Never put negative globs in `patterns`.** Use `exclude` instead; the loader rejects negative globs explicitly.
 7. **Never delete `skeeper.lock` to "fix" a merge conflict.** Resolve it via the merge driver, then run `skeeper verify`.
 8. **Never assume `skeeper hydrate` chases the latest tip.** It restores from the locked commits; `--latest` only exists on `skeeper log`.
+9. **Never force hydrate/reconcile over local managed files without classifying drift first.** Run `skeeper diff` and choose `--adopt-local`, `--prune-local`, `--merge`, `--ours`, or `--theirs` deliberately.
 
 ## References
 

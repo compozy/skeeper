@@ -32,7 +32,7 @@ It mirrors `SPEC.md`, ADRs, RFCs, and AI plan files into a sidecar Git repositor
 - **Fresh-clone hydration.** `skeeper hydrate` restores files from the locked sidecar commits, not a best-effort latest branch.
 - **Safe reconciliation.** `hydrate`, `fsck`, `diff`, and `reconcile` classify per-path drift before any local managed document is overwritten or moved.
 - **Agent-friendly commands.** `status`, `sync`, `verify`, `fsck`, `diff`, `reconcile`, `update`, `hooks check`, `repair status`, `rescue`, `pattern`, `adopt`, and `untrack` all support deterministic output where needed.
-- **Skill for AI agents.** A bundled skill at [`.agents/skills/skeeper/SKILL.md`](.agents/skills/skeeper/SKILL.md) teaches coding agents the strict-sync workflow, namespaces, and recovery commands.
+- **Skill for AI agents.** A bundled skill at [`skills/skeeper/SKILL.md`](skills/skeeper/SKILL.md) teaches coding agents the strict-sync workflow, namespaces, and recovery commands.
 
 ## 🎯 Who Is This For
 
@@ -42,16 +42,51 @@ It mirrors `SPEC.md`, ADRs, RFCs, and AI plan files into a sidecar Git repositor
 
 ## 📦 Installation
 
+#### Homebrew
+
+```bash
+brew tap compozy/compozy
+brew install --cask skeeper
+```
+
+#### NPM
+
+```bash
+npm install -g @compozy/skeeper
+```
+
+#### Go
+
 ```bash
 go install github.com/compozy/skeeper/cmd/skeeper@latest
 ```
 
-Other release channels are available through GitHub Releases, Homebrew, NPM, and the distroless Docker image.
+#### GitHub Releases
+
+Download the archive for your OS and architecture from [GitHub Releases](https://github.com/compozy/skeeper/releases), then place the `skeeper` binary on your `PATH`.
+
+#### From Source
+
+```bash
+git clone git@github.com:compozy/skeeper.git
+cd skeeper
+make verify
+go build -o bin/skeeper ./cmd/skeeper
+```
+
+#### Docker
+
+```bash
+git clone git@github.com:compozy/skeeper.git
+cd skeeper
+make docker-build
+docker run --rm -v "$PWD:/workspace" -w /workspace skeeper:dev status
+```
 
 Prerequisites:
 
 - `git` on `PATH`
-- `gh` only when `skeeper init` creates a new GitHub sidecar repo
+- `gh` only when `skeeper init` creates a new GitHub sidecar repo; existing sidecars can be reused with `--sidecar`
 
 ## 🔄 How It Works
 
@@ -203,43 +238,204 @@ skeeper verify
 
 ## 📖 CLI Reference
 
+Most commands accept `--json` when their output is useful for scripts or agents. Mutating commands usually also accept `--dry-run` for a preview and `--force` only for plans that exceed configured guardrails.
+
+<details>
+<summary><code>skeeper init</code> — Create or connect a sidecar repository</summary>
+
 ```bash
 skeeper init [flags]
+```
+
+Run `init` once per main repository. Without flags in an interactive terminal, it opens the guided setup. With flags, it can create a GitHub sidecar or connect an existing remote.
+
+| Flag             | Default   | Description                                       |
+| ---------------- | --------- | ------------------------------------------------- |
+| `--sidecar`      |           | Existing sidecar repository URL                   |
+| `--sidecar-name` |           | GitHub sidecar repository name or `OWNER/REPO`    |
+| `--visibility`   | `private` | GitHub repository visibility                      |
+| `--namespace`    |           | Sidecar namespace for this project                |
+| `--patterns`     |           | Managed spec glob; repeat for multiple patterns   |
+| `--bootstrap`    |           | Optional install command stored in `.skeeper.yml` |
+
+Examples:
+
+```bash
+skeeper init
+skeeper init --sidecar git@github.com:user/shared-specs.git --namespace project --patterns "**/SPEC.md"
+```
+
+</details>
+
+<details>
+<summary><code>skeeper sync</code> — Publish managed specs and stage <code>skeeper.lock</code></summary>
+
+```bash
 skeeper sync [--dry-run] [--json] [--commit --message <msg>] [--force]
+```
+
+`sync` mirrors working-tree managed files into the sidecar repository, pushes the namespace branch, writes `skeeper.lock`, and stages the lockfile in the main repository. Managed hooks use the same sync path against staged content.
+
+| Flag        | Default | Description                                          |
+| ----------- | ------- | ---------------------------------------------------- |
+| `--dry-run` | `false` | Preview the sidecar and lockfile plan                |
+| `--json`    | `false` | Emit machine-readable output                         |
+| `--commit`  | `false` | Commit staged Skeeper changes in the main repository |
+| `--message` |         | Main repository commit message used with `--commit`  |
+| `--force`   | `false` | Allow plans that exceed configured guardrails        |
+
+</details>
+
+<details>
+<summary><code>skeeper status</code>, <code>verify</code>, and <code>fsck</code> — Inspect sync health</summary>
+
+```bash
+skeeper status [--json]
+skeeper verify [--json] [--source-branch <branch>]
+skeeper fsck [--json] [--source-branch <branch>]
+```
+
+Use `status` for the local picture: sidecar URL, current branch, lock state, namespaces, repair transactions, bypass journal, and diagnostics.
+
+Use `verify` before push or in CI. It checks `skeeper.lock` against the sidecar remote and does not require hooks.
+
+Use `fsck` when local files may have drifted. It compares the working-tree specs against the locked sidecar content and reports exact drift diagnostics without mutating files or refs.
+
+</details>
+
+<details>
+<summary><code>skeeper update</code> — Fresh-clone or agent-safe update workflow</summary>
+
+```bash
+skeeper update [--json] [--no-git] [--reconcile <mode>] [--ours|--theirs]
+```
+
+`update` is the high-level clone workflow for agents and fresh worktrees: fast-forward the main repository, verify the lock, hydrate managed files, run `fsck`, and validate hook installation.
+
+| Flag          | Default  | Description                                                                  |
+| ------------- | -------- | ---------------------------------------------------------------------------- |
+| `--json`      | `false`  | Emit machine-readable status                                                 |
+| `--no-git`    | `false`  | Skip main repository fetch and fast-forward                                  |
+| `--reconcile` | `report` | Drift mode: `report`, `keep-local`, `adopt-local`, `prune-local`, or `merge` |
+| `--ours`      | `false`  | Resolve conflicts using local worktree content                               |
+| `--theirs`    | `false`  | Resolve conflicts using locked sidecar content after rescue                  |
+
+</details>
+
+<details>
+<summary><code>skeeper adopt</code>, <code>untrack</code>, and <code>pattern</code> — Change managed coverage</summary>
+
+```bash
 skeeper adopt <path-or-glob>... [--dry-run] [--json] [--force] [--commit --message <msg>]
 skeeper untrack <path-or-glob>... [--dry-run] [--json] [--force] [--commit --message <msg>]
 skeeper pattern test <glob> [--namespace <name>] [--json]
 skeeper pattern add <glob> [--namespace <name>] [--exclude <glob>]... [--adopt-existing] [--dry-run] [--json] [--force] [--commit --message <msg>]
+```
+
+Use `adopt` when files already exist in the main repository and should move under sidecar coverage. It syncs sidecar coverage before removing main-index tracking.
+
+Use `untrack` when a managed path should stop being tracked in the main repository after the sidecar has the content.
+
+Use `pattern test` before changing `.skeeper.yml`. Use `pattern add --adopt-existing` when a new glob should immediately publish already-matching files into the sidecar.
+
+| Flag               | Commands                          | Description                                     |
+| ------------------ | --------------------------------- | ----------------------------------------------- |
+| `--namespace`      | `pattern test/add`                | Select the namespace to inspect or update       |
+| `--exclude`        | `pattern add`                     | Add an exclusion with the new pattern           |
+| `--adopt-existing` | `pattern add`                     | Adopt existing files matched by the new pattern |
+| `--dry-run`        | `adopt`, `untrack`, `pattern add` | Preview without writing changes                 |
+| `--commit`         | `adopt`, `untrack`, `pattern add` | Commit staged main-repository changes           |
+| `--message`        | `adopt`, `untrack`, `pattern add` | Commit message used with `--commit`             |
+| `--force`          | `adopt`, `untrack`, `pattern add` | Allow plans beyond configured guardrails        |
+
+</details>
+
+<details>
+<summary><code>skeeper diff</code>, <code>hydrate</code>, and <code>reconcile</code> — Inspect and resolve drift</summary>
+
+```bash
+skeeper diff [--json] [--namespace <name>] [--class <class>] [--extra] [--missing] [--modified]
 skeeper hydrate [--dry-run] [--json] [--keep-local|--adopt-local|--prune-local|--merge] [--ours|--theirs]
 skeeper reconcile [--dry-run] [--json] [--adopt-local|--prune-local|--merge] [--ours|--theirs]
-skeeper diff [--json] [--namespace <name>] [--class <class>] [--extra] [--missing] [--modified]
+```
+
+Use `diff` for a read-only list of managed paths that differ from `skeeper.lock`. Drift classes include `local_only`, `missing_local`, `local_modified`, `sidecar_modified`, `both_modified_conflict`, `namespace_removed`, and `config_unowned`.
+
+Use `hydrate` after clone or branch switch to restore managed files from locked sidecar commits. By default it fails closed if local managed files would be overwritten or orphaned.
+
+Use `reconcile` when you want the explicit status/add/merge equivalent for managed documents.
+
+| Flag            | Commands               | Description                                                 |
+| --------------- | ---------------------- | ----------------------------------------------------------- |
+| `--namespace`   | `diff`                 | Restrict output to one namespace                            |
+| `--class`       | `diff`                 | Filter by drift class; repeat for multiple classes          |
+| `--extra`       | `diff`                 | Show local-only files                                       |
+| `--missing`     | `diff`                 | Show missing local files                                    |
+| `--modified`    | `diff`                 | Show local, sidecar, and conflict modifications             |
+| `--keep-local`  | `hydrate`              | Restore safe files and keep local drift                     |
+| `--adopt-local` | `hydrate`, `reconcile` | Publish local drift into the sidecar                        |
+| `--prune-local` | `hydrate`, `reconcile` | Move local-only files to `.git/skeeper/rescue/<id>/`        |
+| `--merge`       | `hydrate`, `reconcile` | Three-way merge conflicts using the hydration journal       |
+| `--ours`        | `hydrate`, `reconcile` | Resolve conflicts using local worktree content              |
+| `--theirs`      | `hydrate`, `reconcile` | Resolve conflicts using locked sidecar content after rescue |
+
+</details>
+
+<details>
+<summary><code>skeeper rescue</code> and <code>repair</code> — Recover from interrupted or protective operations</summary>
+
+```bash
 skeeper rescue list [--json]
 skeeper rescue restore <id> [path...] [--json] [--overwrite]
-skeeper update [--json] [--no-git] [--reconcile <report|keep-local|adopt-local|prune-local|merge>] [--ours|--theirs]
-skeeper status [--json]
-skeeper log <path> [--latest]
-skeeper fsck [--json] [--source-branch <branch>]
-skeeper verify [--json] [--source-branch <branch>]
+skeeper repair status [--json]
+skeeper repair resume
+skeeper repair abort
+```
+
+`rescue` manages files moved aside before prune or overwrite operations. Use `rescue list` to find rescue manifests and `rescue restore` to bring back all files or selected paths.
+
+`repair` manages local recovery state under `.git/skeeper/`. Use `repair status` after a failed hook or sync, `repair resume` after fixing network/auth/sidecar contention, and `repair abort` only when the recorded transaction has not mutated the main index.
+
+| Flag          | Commands                  | Description                        |
+| ------------- | ------------------------- | ---------------------------------- |
+| `--overwrite` | `rescue restore`          | Overwrite existing restore targets |
+| `--json`      | `rescue`, `repair status` | Emit machine-readable output       |
+
+</details>
+
+<details>
+<summary><code>skeeper hooks</code> and <code>merge-driver</code> — Install and maintain Git integration</summary>
+
+```bash
 skeeper hooks install [--json]
 skeeper hooks check [--json]
 skeeper merge-driver [--json]
-skeeper repair status|resume|abort [--json]
-skeeper version
 ```
 
-Command notes:
+`hooks install` installs the managed `pre-commit`, `pre-merge-commit`, and `pre-push` blocks, writes `.gitattributes`, and configures the `skeeper.lock` merge driver. It also removes legacy Skeeper post-commit blocks.
 
-- `sync` uses working-tree content and stages `skeeper.lock`. Hook mode uses staged index content.
-- `adopt` and `untrack` push sidecar coverage before removing main-index tracking.
-- `pattern add --adopt-existing` updates `.skeeper.yml`, updates the managed `.gitignore` block, then runs the same adoption transaction.
-- `verify` checks `skeeper.lock` against the sidecar remote and does not require hooks.
-- `fsck` compares current working-tree specs against locked sidecar content, reports exact drift paths, and does not mutate files or refs.
-- `hydrate` restores from locked sidecar commits by default, but fails closed if local managed files would be overwritten or orphaned.
-- `reconcile` is the explicit status/add/merge equivalent for managed documents. Use `--adopt-local` to publish local-only files, or `--prune-local` to move them to `.git/skeeper/rescue/<id>/` before restoring.
-- `diff` lists per-path drift classes such as `local_only`, `missing_local`, `local_modified`, and `both_modified_conflict`.
-- `update` is the high-level clone workflow for agents: safe fast-forward, verify, hydrate, fsck, and hook validation.
-- `log --latest` fetches the namespace branch and reads its latest history instead of the locked commit.
-- `hooks install` removes legacy Skeeper post-commit blocks, installs strict pre-commit/pre-merge-commit/pre-push blocks, writes `.gitattributes`, and configures the `skeeper.lock` merge driver.
+`hooks check` validates that the managed hook installation is healthy.
+
+`merge-driver` regenerates `skeeper.lock` during Git merges. It is normally invoked by Git with `%O %A %B` paths after `hooks install` configures the driver; manual lockfile editing is unsupported.
+
+</details>
+
+<details>
+<summary><code>skeeper log</code>, <code>version</code>, and <code>completion</code> — Utility commands</summary>
+
+```bash
+skeeper log <path> [--latest] [--source-branch <branch>]
+skeeper version
+skeeper completion <bash|fish|powershell|zsh>
+```
+
+`log` shows sidecar history for one managed spec path. By default it reads the locked commit; use `--latest` to fetch and inspect the latest namespace branch instead.
+
+`version` prints build version, commit, and build date.
+
+`completion` is provided by Cobra and generates shell completion scripts.
+
+</details>
 
 ## 🤖 CI Action
 
@@ -260,7 +456,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: compozy/skeeper@v0.1.1
+      - uses: compozy/skeeper@v0.2.1
         with:
           args: |
             verify
