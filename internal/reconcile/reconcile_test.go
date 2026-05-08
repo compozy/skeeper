@@ -203,6 +203,58 @@ func TestPlanJSONShapeOmitsRuntimeConfig(t *testing.T) {
 	}
 }
 
+func TestBuildNamespaceDiffClassifiesPathStates(t *testing.T) {
+	t.Parallel()
+
+	diff := BuildNamespaceDiff(NamespaceDiffInput{
+		Name: "repo",
+		Locked: map[string]SnapshotFile{
+			"both.md":             {Path: "both.md", SHA256: "locked", Size: 6},
+			"local-modified.md":   {Path: "local-modified.md", SHA256: "base", Size: 4},
+			"missing.md":          {Path: "missing.md", SHA256: "locked", Size: 6},
+			"sidecar-modified.md": {Path: "sidecar-modified.md", SHA256: "locked", Size: 6},
+			"same.md":             {Path: "same.md", SHA256: "same", Size: 4},
+		},
+		Local: map[string]SnapshotFile{
+			"both.md":             {Path: "both.md", SHA256: "local", Size: 5},
+			"local-modified.md":   {Path: "local-modified.md", SHA256: "local", Size: 5},
+			"local-only.md":       {Path: "local-only.md", SHA256: "local", Size: 5},
+			"sidecar-modified.md": {Path: "sidecar-modified.md", SHA256: "base", Size: 4},
+			"same.md":             {Path: "same.md", SHA256: "same", Size: 4},
+		},
+		Base: map[string]BaseFile{
+			"both.md":             {SHA256: "base", Size: 4},
+			"local-modified.md":   {SHA256: "base", Size: 4},
+			"sidecar-modified.md": {SHA256: "base", Size: 4},
+		},
+	})
+
+	got := map[string]PathClass{}
+	for _, path := range diff.Paths {
+		got[path.Path] = path.Class
+	}
+	want := map[string]PathClass{
+		"both.md":             PathBothModifiedConflict,
+		"local-modified.md":   PathLocalModified,
+		"local-only.md":       PathLocalOnly,
+		"missing.md":          PathMissingLocal,
+		"same.md":             PathUnchanged,
+		"sidecar-modified.md": PathSidecarModified,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("diff path count mismatch: got %#v want %#v", got, want)
+	}
+	for path, class := range want {
+		if got[path] != class {
+			t.Fatalf("%s class mismatch: got %q want %q (all=%#v)", path, got[path], class, got)
+		}
+	}
+	summary := SummarizeDiff([]NamespaceDiff{diff})
+	if summary.OK {
+		t.Fatalf("expected non-ok summary: %#v", summary)
+	}
+}
+
 func newRepo(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

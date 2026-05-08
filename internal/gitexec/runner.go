@@ -19,6 +19,7 @@ type Result struct {
 // Runner executes external commands in a working directory.
 type Runner interface {
 	Run(ctx context.Context, dir, name string, args ...string) (Result, error)
+	RunWithInput(ctx context.Context, dir, stdin, name string, args ...string) (Result, error)
 }
 
 // ExecRunner runs commands with os/exec.
@@ -28,8 +29,22 @@ var _ Runner = (*ExecRunner)(nil)
 
 // Run executes name with args in dir and returns stdout and stderr.
 func (r *ExecRunner) Run(ctx context.Context, dir, name string, args ...string) (Result, error) {
+	return r.RunWithInput(ctx, dir, "", name, args...)
+}
+
+// RunWithInput executes name with args and writes stdin to the process.
+func (r *ExecRunner) RunWithInput(
+	ctx context.Context,
+	dir string,
+	stdin string,
+	name string,
+	args ...string,
+) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -59,10 +59,25 @@ type HookSettings struct {
 
 // Namespace routes a set of project files into one sidecar namespace.
 type Namespace struct {
-	Name             string   `yaml:"name"`
-	Patterns         []string `yaml:"patterns"`
-	Exclude          []string `yaml:"exclude,omitempty"`
-	RespectGitignore *bool    `yaml:"respect_gitignore,omitempty"`
+	Name             string        `yaml:"name"`
+	Patterns         []string      `yaml:"patterns"`
+	Exclude          []string      `yaml:"exclude,omitempty"`
+	RespectGitignore *bool         `yaml:"respect_gitignore,omitempty"`
+	Hydrate          HydratePolicy `yaml:"hydrate,omitempty"`
+}
+
+// HydratePolicy configures namespace defaults for safe materialization.
+type HydratePolicy struct {
+	OnLocalOnly string        `yaml:"on_local_only,omitempty"`
+	OnModified  string        `yaml:"on_modified,omitempty"`
+	Rules       []HydrateRule `yaml:"rules,omitempty"`
+}
+
+// HydrateRule configures hydrate defaults for a subset of paths.
+type HydrateRule struct {
+	Pattern     string `yaml:"pattern"`
+	OnLocalOnly string `yaml:"on_local_only,omitempty"`
+	OnModified  string `yaml:"on_modified,omitempty"`
 }
 
 // DefaultPatterns returns the interactive init defaults.
@@ -246,14 +261,62 @@ func NormalizeNamespaces(namespaces []Namespace) ([]Namespace, error) {
 		if err != nil {
 			return nil, fmt.Errorf("namespaces[%d]: %w", i, err)
 		}
+		hydrate, err := NormalizeHydratePolicy(namespace.Hydrate)
+		if err != nil {
+			return nil, fmt.Errorf("namespaces[%d].hydrate: %w", i, err)
+		}
 		normalized = append(normalized, Namespace{
 			Name:             name,
 			Patterns:         patterns,
 			Exclude:          exclude,
 			RespectGitignore: normalizeRespectGitignore(namespace.RespectGitignore),
+			Hydrate:          hydrate,
 		})
 	}
 	return normalized, nil
+}
+
+// NormalizeHydratePolicy validates and canonicalizes hydrate defaults.
+func NormalizeHydratePolicy(policy HydratePolicy) (HydratePolicy, error) {
+	if err := validateLocalOnlyPolicy(policy.OnLocalOnly); err != nil {
+		return HydratePolicy{}, fmt.Errorf("on_local_only: %w", err)
+	}
+	if err := validateModifiedPolicy(policy.OnModified); err != nil {
+		return HydratePolicy{}, fmt.Errorf("on_modified: %w", err)
+	}
+	for i, rule := range policy.Rules {
+		patterns, err := normalizePatternsField("rules.pattern", []string{rule.Pattern})
+		if err != nil {
+			return HydratePolicy{}, fmt.Errorf("rules[%d]: %w", i, err)
+		}
+		rule.Pattern = patterns[0]
+		if err := validateLocalOnlyPolicy(rule.OnLocalOnly); err != nil {
+			return HydratePolicy{}, fmt.Errorf("rules[%d].on_local_only: %w", i, err)
+		}
+		if err := validateModifiedPolicy(rule.OnModified); err != nil {
+			return HydratePolicy{}, fmt.Errorf("rules[%d].on_modified: %w", i, err)
+		}
+		policy.Rules[i] = rule
+	}
+	return policy, nil
+}
+
+func validateLocalOnlyPolicy(value string) error {
+	switch value {
+	case "", "fail", "keep", "adopt", "prune_to_rescue":
+		return nil
+	default:
+		return fmt.Errorf("unsupported policy %q", value)
+	}
+}
+
+func validateModifiedPolicy(value string) error {
+	switch value {
+	case "", "fail", "keep", "merge", "adopt", "overwrite_to_rescue":
+		return nil
+	default:
+		return fmt.Errorf("unsupported policy %q", value)
+	}
 }
 
 // NormalizePatterns validates and canonicalizes doublestar path globs while

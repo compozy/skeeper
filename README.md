@@ -30,7 +30,8 @@ It mirrors `SPEC.md`, ADRs, RFCs, and AI plan files into a sidecar Git repositor
 - **Shared sidecars without collisions.** Namespaces isolate stored paths and sidecar branches inside one sidecar remote.
 - **Branch-aware history.** Namespace branches use `<namespace>/__branches__/<source-branch>`.
 - **Fresh-clone hydration.** `skeeper hydrate` restores files from the locked sidecar commits, not a best-effort latest branch.
-- **Agent-friendly commands.** `status`, `sync`, `verify`, `fsck`, `hooks check`, `repair status`, `pattern`, `adopt`, and `untrack` all support deterministic output where needed.
+- **Safe reconciliation.** `hydrate`, `fsck`, `diff`, and `reconcile` classify per-path drift before any local managed document is overwritten or moved.
+- **Agent-friendly commands.** `status`, `sync`, `verify`, `fsck`, `diff`, `reconcile`, `update`, `hooks check`, `repair status`, `rescue`, `pattern`, `adopt`, and `untrack` all support deterministic output where needed.
 - **Skill for AI agents.** A bundled skill at [`.agents/skills/skeeper/SKILL.md`](.agents/skills/skeeper/SKILL.md) teaches coding agents the strict-sync workflow, namespaces, and recovery commands.
 
 ## 🎯 Who Is This For
@@ -134,6 +135,8 @@ Local-only state lives under `.git/skeeper/`:
 | ------------------ | ---------------------------------------------- |
 | `transaction.json` | Current resumable mutating operation and phase |
 | `bypass.json`      | Latest audited strict-hook bypass              |
+| `hydration.json`   | Last locked sidecar blobs hydrated locally     |
+| `rescue/`          | Local files moved aside before prune/overwrite |
 
 ## 🚀 Quick Start
 
@@ -207,7 +210,12 @@ skeeper adopt <path-or-glob>... [--dry-run] [--json] [--force] [--commit --messa
 skeeper untrack <path-or-glob>... [--dry-run] [--json] [--force] [--commit --message <msg>]
 skeeper pattern test <glob> [--namespace <name>] [--json]
 skeeper pattern add <glob> [--namespace <name>] [--exclude <glob>]... [--adopt-existing] [--dry-run] [--json] [--force] [--commit --message <msg>]
-skeeper hydrate
+skeeper hydrate [--dry-run] [--json] [--keep-local|--adopt-local|--prune-local|--merge] [--ours|--theirs]
+skeeper reconcile [--dry-run] [--json] [--adopt-local|--prune-local|--merge] [--ours|--theirs]
+skeeper diff [--json] [--namespace <name>] [--class <class>] [--extra] [--missing] [--modified]
+skeeper rescue list [--json]
+skeeper rescue restore <id> [path...] [--json] [--overwrite]
+skeeper update [--json] [--no-git] [--reconcile <report|keep-local|adopt-local|prune-local|merge>] [--ours|--theirs]
 skeeper status [--json]
 skeeper log <path> [--latest]
 skeeper fsck [--json] [--source-branch <branch>]
@@ -225,8 +233,11 @@ Command notes:
 - `adopt` and `untrack` push sidecar coverage before removing main-index tracking.
 - `pattern add --adopt-existing` updates `.skeeper.yml`, updates the managed `.gitignore` block, then runs the same adoption transaction.
 - `verify` checks `skeeper.lock` against the sidecar remote and does not require hooks.
-- `fsck` compares current working-tree specs against locked sidecar content and does not mutate files or refs.
-- `hydrate` restores from locked sidecar commits by default.
+- `fsck` compares current working-tree specs against locked sidecar content, reports exact drift paths, and does not mutate files or refs.
+- `hydrate` restores from locked sidecar commits by default, but fails closed if local managed files would be overwritten or orphaned.
+- `reconcile` is the explicit status/add/merge equivalent for managed documents. Use `--adopt-local` to publish local-only files, or `--prune-local` to move them to `.git/skeeper/rescue/<id>/` before restoring.
+- `diff` lists per-path drift classes such as `local_only`, `missing_local`, `local_modified`, and `both_modified_conflict`.
+- `update` is the high-level clone workflow for agents: safe fast-forward, verify, hydrate, fsck, and hook validation.
 - `log --latest` fetches the namespace branch and reads its latest history instead of the locked commit.
 - `hooks install` removes legacy Skeeper post-commit blocks, installs strict pre-commit/pre-merge-commit/pre-push blocks, writes `.gitattributes`, and configures the `skeeper.lock` merge driver.
 
@@ -278,6 +289,10 @@ Run `skeeper repair status`. If the failure happened before main-index mutation,
 **`skeeper.lock` conflicts during merge**
 
 Run `skeeper hooks install` to ensure the merge driver is configured, then rerun the merge. Manual editing of scalar sidecar SHAs is unsupported; regenerate the lock through `skeeper merge-driver` or `skeeper sync`.
+
+**`skeeper hydrate` is blocked by local managed files**
+
+Run `skeeper diff` to inspect exact paths. Use `skeeper reconcile --adopt-local` when the local files should be published into the sidecar, or `skeeper reconcile --prune-local` when they should be moved to rescue before restoring the locked content. Use `skeeper rescue list` and `skeeper rescue restore <id>` to recover pruned files.
 
 **`verify` reports a lock mismatch**
 

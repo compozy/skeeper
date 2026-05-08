@@ -147,8 +147,9 @@ type FSCKOptions struct {
 
 // FSCKResult reports working-tree drift against the lock.
 type FSCKResult struct {
-	OK          bool                   `json:"ok"`
-	Diagnostics []reconcile.Diagnostic `json:"diagnostics,omitempty"`
+	OK          bool                      `json:"ok"`
+	Namespaces  []reconcile.NamespaceDiff `json:"namespaces,omitempty"`
+	Diagnostics []reconcile.Diagnostic    `json:"diagnostics,omitempty"`
 }
 
 // Status describes the current sidecar state.
@@ -165,14 +166,20 @@ type Status struct {
 
 // NamespaceStatus describes one namespace's sidecar state.
 type NamespaceStatus struct {
-	Name         string                   `json:"name"`
-	Branch       string                   `json:"branch"`
-	LastCommit   string                   `json:"last_commit,omitempty"`
-	LastUnix     int64                    `json:"last_unix,omitempty"`
-	Remote       string                   `json:"remote"`
-	TrackedFiles int                      `json:"tracked_files"`
-	LockedCommit string                   `json:"locked_commit,omitempty"`
-	LockedDigest lockfile.NamespaceDigest `json:"locked_digest,omitempty"`
+	Name            string                   `json:"name"`
+	Branch          string                   `json:"branch"`
+	LastCommit      string                   `json:"last_commit,omitempty"`
+	LastUnix        int64                    `json:"last_unix,omitempty"`
+	Remote          string                   `json:"remote"`
+	TrackedFiles    int                      `json:"tracked_files"`
+	LockedCommit    string                   `json:"locked_commit,omitempty"`
+	LockedDigest    lockfile.NamespaceDigest `json:"locked_digest,omitempty"`
+	RemoteTip       string                   `json:"remote_tip,omitempty"`
+	LocalBranchTip  string                   `json:"local_branch_tip,omitempty"`
+	WorktreeHead    string                   `json:"sidecar_worktree_head,omitempty"`
+	LockRemoteState string                   `json:"lock_remote_state,omitempty"`
+	CloneState      string                   `json:"clone_state,omitempty"`
+	Diff            reconcile.ClassCount     `json:"diff"`
 }
 
 // LogOptions configures sidecar history output.
@@ -354,60 +361,26 @@ func (s *Service) Init(ctx context.Context, dir string, opts InitOptions) (InitR
 }
 
 // Hydrate clones the sidecar if needed and restores spec files from skeeper.lock.
-func (s *Service) Hydrate(ctx context.Context, dir string) (HydrateResult, error) {
-	root, cfg, _, err := s.loadProject(ctx, dir)
-	if err != nil {
-		return HydrateResult{}, err
+func (s *Service) Hydrate(ctx context.Context, dir string, options ...HydrateOptions) (HydrateResult, error) {
+	opts := HydrateOptions{}
+	if len(options) > 0 {
+		opts = options[0]
 	}
-	if err := s.ensureClone(ctx, root, cfg.Sidecar); err != nil {
-		return HydrateResult{}, err
-	}
-	lock, err := s.locks.Load(reconcile.RepoRoot(root))
-	if err != nil {
-		return HydrateResult{}, err
-	}
-	sidecarDir := sidecarPath(root)
-	if _, err := s.runner.Run(ctx, sidecarDir, "git", "fetch", "origin"); err != nil {
-		return HydrateResult{}, fmt.Errorf("fetch sidecar origin: %w", err)
-	}
-	restored := make([]string, 0)
-	for _, record := range lock.Namespaces {
-		if err := s.ensureCommit(ctx, sidecarDir, record.Commit); err != nil {
-			return HydrateResult{}, err
-		}
-		paths, err := s.treePaths(ctx, sidecarDir, record.Commit, record.Name)
-		if err != nil {
-			return HydrateResult{}, err
-		}
-		for _, sidecarRel := range paths {
-			mainRel := strings.TrimPrefix(sidecarRel, record.Name+"/")
-			blob, err := s.runner.Run(ctx, sidecarDir, "git", "show", record.Commit+":"+sidecarRel)
-			if err != nil {
-				return HydrateResult{}, fmt.Errorf("read sidecar blob %s: %w", sidecarRel, err)
-			}
-			if err := writeStringFile(
-				filepath.Join(root, filepath.FromSlash(mainRel)),
-				blob.Stdout,
-				0o644,
-			); err != nil {
-				return HydrateResult{}, err
-			}
-			restored = append(restored, mainRel)
-		}
-	}
-	installed, err := s.hooks.Install(ctx, reconcile.RepoRoot(root), hooks.InstallOptions{Config: cfg})
-	if err != nil {
-		return HydrateResult{}, err
-	}
-	_ = installed
-	sort.Strings(restored)
-	return HydrateResult{Restored: restored, Commit: lockCommitSummary(lock)}, nil
+	return s.hydrate(ctx, dir, opts)
 }
 
 // HydrateResult reports files restored by hydrate.
 type HydrateResult struct {
-	Restored []string `json:"restored"`
-	Commit   string   `json:"commit"`
+	OK             bool                   `json:"ok"`
+	Restored       []string               `json:"restored"`
+	Skipped        []string               `json:"skipped,omitempty"`
+	Rescue         *state.RescueManifest  `json:"rescue,omitempty"`
+	Commit         string                 `json:"commit"`
+	DryRun         bool                   `json:"dry_run,omitempty"`
+	HooksInstalled bool                   `json:"hooks_installed"`
+	Plan           reconcile.DiffSummary  `json:"plan"`
+	FSCKAfter      *FSCKResult            `json:"fsck_after,omitempty"`
+	Diagnostics    []reconcile.Diagnostic `json:"diagnostics,omitempty"`
 }
 
 // Sync mirrors main-tree spec files into the sidecar, pushes, writes, and stages skeeper.lock.
@@ -453,6 +426,9 @@ func (s *Service) Sync(ctx context.Context, dir string, opts SyncOptions) (SyncR
 		Namespaces:   namespaceRecords(result.Namespaces),
 	}
 	if err := s.locks.Write(reconcile.RepoRoot(root), lock); err != nil {
+		return SyncResult{}, err
+	}
+	if err := s.writeHydrationJournalForLock(ctx, root, store, lock); err != nil {
 		return SyncResult{}, err
 	}
 	if _, err := s.runner.Run(ctx, root, "git", "add", lockfile.Filename); err != nil {
@@ -651,24 +627,12 @@ func (s *Service) fetchLockedBranches(ctx context.Context, sidecarDir string, lo
 
 // FSCK compares working-tree owned specs against skeeper.lock.
 func (s *Service) FSCK(ctx context.Context, dir string, opts FSCKOptions) (FSCKResult, error) {
-	root, _, store, err := s.loadProject(ctx, dir)
+	diff, err := s.diffProject(ctx, dir, opts.SourceBranch, false)
 	if err != nil {
 		return FSCKResult{}, err
 	}
-	lock, err := s.locks.Load(reconcile.RepoRoot(root))
-	if err != nil {
-		return FSCKResult{}, err
-	}
-	plan, err := s.planner.PlanFSCK(
-		ctx,
-		reconcile.RepoRoot(root),
-		reconcile.FSCKPlanOptions{SourceBranch: opts.SourceBranch},
-	)
-	if err != nil {
-		return FSCKResult{}, err
-	}
-	result := FSCKResult{OK: true}
-	if bypass, ok, err := store.Bypass(ctx); err != nil {
+	result := FSCKResult{OK: diff.summary.OK, Namespaces: diff.summary.Namespaces}
+	if bypass, ok, err := diff.store.Bypass(ctx); err != nil {
 		return FSCKResult{}, err
 	} else if ok {
 		result.OK = false
@@ -679,30 +643,19 @@ func (s *Service) FSCK(ctx context.Context, dir string, opts FSCKOptions) (FSCKR
 			"skeeper sync",
 		))
 	}
-	for _, record := range lock.Namespaces {
-		namespacePlan, ok := planNamespace(plan, record.Name)
-		if !ok {
-			result.OK = false
-			result.Diagnostics = append(result.Diagnostics, diagnostic(
-				"fsck.namespace_missing",
-				fmt.Sprintf("namespace %s is present in lock but missing from config", record.Name),
-				record.Name,
-				"skeeper sync",
-			))
-			continue
-		}
-		files := filePlanPaths(namespacePlan.Files)
-		digest, err := lockfile.DigestWorkingTree(root, files, namespacePlan.StagedContent)
-		if err != nil {
-			return FSCKResult{}, err
-		}
-		if digest.Digest != record.Digest || digest.Files != record.Files || digest.Bytes != record.Bytes {
-			result.OK = false
+	for _, namespace := range diff.summary.Namespaces {
+		if namespace.Counts.MissingLocal != 0 ||
+			namespace.Counts.LocalOnly != 0 ||
+			namespace.Counts.LocalModified != 0 ||
+			namespace.Counts.SidecarModified != 0 ||
+			namespace.Counts.BothModifiedConflict != 0 ||
+			namespace.Counts.NamespaceRemoved != 0 ||
+			namespace.Counts.ConfigUnowned != 0 {
 			result.Diagnostics = append(result.Diagnostics, diagnostic(
 				"fsck.working_tree_drift",
-				fmt.Sprintf("namespace %s working tree differs from locked sidecar content", record.Name),
-				record.Name,
-				"skeeper sync",
+				fmt.Sprintf("namespace %s working tree differs from locked sidecar content", namespace.Name),
+				namespace.Name,
+				"skeeper reconcile",
 			))
 		}
 	}
@@ -724,13 +677,32 @@ func (s *Service) Status(ctx context.Context, dir string) (Status, error) {
 		return Status{}, err
 	}
 	status := Status{Sidecar: cfg.Sidecar, Branch: branch}
-	if tx, ok, err := store.Current(ctx); err != nil {
+	if err := s.loadStatusState(ctx, store, &status); err != nil {
 		return Status{}, err
+	}
+	lock, lockErr := s.locks.Load(reconcile.RepoRoot(root))
+	if lockErr == nil {
+		status.LockPresent = true
+		status.LockCommit = lockCommitSummary(lock)
+	}
+	diff := s.statusDiff(ctx, root, status.LockPresent)
+	for _, namespace := range plan.Namespaces {
+		status.Namespaces = append(
+			status.Namespaces,
+			s.namespaceStatus(ctx, root, namespace, lock, status.LockPresent, diff),
+		)
+	}
+	return status, nil
+}
+
+func (s *Service) loadStatusState(ctx context.Context, store *state.Store, status *Status) error {
+	if tx, ok, err := store.Current(ctx); err != nil {
+		return err
 	} else if ok {
 		status.Transaction = &tx
 	}
 	if bypass, ok, err := store.Bypass(ctx); err != nil {
-		return Status{}, err
+		return err
 	} else if ok {
 		status.Bypass = &bypass
 		status.Diagnostics = append(
@@ -738,34 +710,95 @@ func (s *Service) Status(ctx context.Context, dir string) (Status, error) {
 			diagnostic("bypass.active", "strict hook bypass is active; run `skeeper sync`", "", "skeeper sync"),
 		)
 	}
-	lock, lockErr := s.locks.Load(reconcile.RepoRoot(root))
-	if lockErr == nil {
-		status.LockPresent = true
-		status.LockCommit = lockCommitSummary(lock)
+	return nil
+}
+
+func (s *Service) statusDiff(ctx context.Context, root string, lockPresent bool) reconcile.DiffSummary {
+	if !lockPresent {
+		return reconcile.DiffSummary{}
 	}
-	for _, namespace := range plan.Namespaces {
-		nsStatus := NamespaceStatus{
-			Name:         string(namespace.Name),
-			Branch:       namespace.Branch,
-			TrackedFiles: len(namespace.Files),
-			Remote:       "not checked",
-		}
-		if status.LockPresent {
-			if record, ok := lockRecord(lock, string(namespace.Name)); ok {
-				nsStatus.LockedCommit = shortHash(record.Commit)
-				nsStatus.LockedDigest = record.Digest
-				nsStatus.LastCommit = shortHash(record.Commit)
-			}
-		}
-		if exists(filepath.Join(root, DirName, ".git")) {
-			nsStatus.Remote = s.remoteState(ctx, sidecarPath(root), namespace.Branch)
-			if info, err := s.git.LastCommit(ctx, sidecarPath(root)); err == nil {
-				nsStatus.LastUnix = info.Unix
-			}
-		}
-		status.Namespaces = append(status.Namespaces, nsStatus)
+	diff, err := s.diffProject(ctx, root, "", false)
+	if err != nil {
+		return reconcile.DiffSummary{}
 	}
-	return status, nil
+	return diff.summary
+}
+
+func (s *Service) namespaceStatus(
+	ctx context.Context,
+	root string,
+	namespace reconcile.NamespacePlan,
+	lock lockfile.Lock,
+	lockPresent bool,
+	diff reconcile.DiffSummary,
+) NamespaceStatus {
+	status := NamespaceStatus{
+		Name:         string(namespace.Name),
+		Branch:       namespace.Branch,
+		TrackedFiles: len(namespace.Files),
+		Remote:       "not checked",
+		Diff:         namespaceDiffCounts(diff, string(namespace.Name)),
+	}
+	if lockPresent {
+		s.applyLockedStatus(ctx, root, lock, &status)
+	}
+	if exists(filepath.Join(root, DirName, ".git")) {
+		s.applyCloneStatus(ctx, root, namespace.Branch, &status)
+	}
+	return status
+}
+
+func (s *Service) applyLockedStatus(
+	ctx context.Context,
+	root string,
+	lock lockfile.Lock,
+	status *NamespaceStatus,
+) {
+	record, ok := lockRecord(lock, status.Name)
+	if !ok {
+		return
+	}
+	status.LockedCommit = shortHash(record.Commit)
+	status.LockedDigest = record.Digest
+	status.LastCommit = shortHash(record.Commit)
+	remoteTip, remoteState := s.lockRemoteState(ctx, sidecarPath(root), record)
+	if remoteTip == "" && remoteState == "" {
+		return
+	}
+	status.RemoteTip = shortHash(remoteTip)
+	status.LockRemoteState = remoteState
+	status.Remote = remoteState
+}
+
+func (s *Service) applyCloneStatus(
+	ctx context.Context,
+	root string,
+	branch string,
+	status *NamespaceStatus,
+) {
+	sidecarRoot := sidecarPath(root)
+	status.CloneState = s.remoteState(ctx, sidecarRoot, branch)
+	if status.Remote == "not checked" {
+		status.Remote = status.CloneState
+	}
+	if tip, err := s.revParse(ctx, sidecarRoot, "refs/heads/"+branch); err == nil {
+		status.LocalBranchTip = shortHash(tip)
+	}
+	if head, err := s.revParse(ctx, sidecarRoot, "HEAD"); err == nil {
+		status.WorktreeHead = shortHash(head)
+	}
+	if info, err := s.git.LastCommit(ctx, sidecarRoot); err == nil {
+		status.LastUnix = info.Unix
+	}
+}
+
+func namespaceDiffCounts(summary reconcile.DiffSummary, name string) reconcile.ClassCount {
+	for _, namespace := range summary.Namespaces {
+		if namespace.Name == name {
+			return namespace.Counts
+		}
+	}
+	return reconcile.ClassCount{}
 }
 
 // Log returns sidecar history for a mirrored file path.
@@ -1041,7 +1074,7 @@ func (s *Service) MergeDriver(
 	if err != nil {
 		return MergeDriverResult{}, err
 	}
-	if err := writeStringFile(outputPath, string(data), 0o644); err != nil {
+	if err := writeStringFile(outputPath, string(data)); err != nil {
 		return MergeDriverResult{}, fmt.Errorf("write merge-driver output %s: %w", outputPath, err)
 	}
 	result := MergeDriverResult{
@@ -1725,22 +1758,6 @@ func (s *Service) ensureCommit(ctx context.Context, sidecarDir, commit string) e
 	return nil
 }
 
-func (s *Service) treePaths(ctx context.Context, sidecarDir, commit, namespace string) ([]string, error) {
-	out, err := s.runner.Run(ctx, sidecarDir, "git", "ls-tree", "-r", "-z", "--name-only", commit, "--", namespace)
-	if err != nil {
-		return nil, fmt.Errorf("list sidecar paths for namespace %s: %w", namespace, err)
-	}
-	paths := make([]string, 0)
-	for path := range strings.SplitSeq(out.Stdout, "\x00") {
-		path = filepath.ToSlash(strings.TrimSpace(path))
-		if path != "" {
-			paths = append(paths, path)
-		}
-	}
-	sort.Strings(paths)
-	return paths, nil
-}
-
 func (s *Service) revParse(ctx context.Context, dir, revision string) (string, error) {
 	out, err := s.runner.Run(ctx, dir, "git", "rev-parse", revision)
 	if err != nil {
@@ -1766,7 +1783,7 @@ func mirrorFiles(root, sidecarDir string, namespace reconcile.NamespacePlan, sid
 		mainSet[file.Path] = struct{}{}
 		dst := filepath.Join(sidecarDir, filepath.FromSlash(file.Path))
 		if content, ok := namespace.StagedContent[file.Path]; ok {
-			if err := writeStringFile(dst, content, 0o644); err != nil {
+			if err := writeStringFile(dst, content); err != nil {
 				return err
 			}
 			continue
@@ -1813,11 +1830,11 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-func writeStringFile(path, content string, perm os.FileMode) error {
+func writeStringFile(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create parent for %s: %w", path, err)
 	}
-	file, err := os.OpenFile(filepath.Clean(path), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	file, err := os.OpenFile(filepath.Clean(path), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}

@@ -87,6 +87,36 @@ namespaces:
 	}
 }
 
+func TestLoadHydratePolicy(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, Filename), []byte(`
+sidecar: git@example.com:org/specs.git
+namespaces:
+  - name: repo
+    patterns:
+      - "**/*.md"
+    hydrate:
+      on_local_only: prune_to_rescue
+      on_modified: merge
+      rules:
+        - pattern: ".codex/ledger/**"
+          on_local_only: keep
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	policy := cfg.Namespaces[0].Hydrate
+	if policy.OnLocalOnly != "prune_to_rescue" || policy.OnModified != "merge" ||
+		len(policy.Rules) != 1 || policy.Rules[0].Pattern != ".codex/ledger/**" {
+		t.Fatalf("unexpected hydrate policy: %#v", policy)
+	}
+}
+
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	t.Parallel()
 

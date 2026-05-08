@@ -36,6 +36,18 @@
       "sourceType": "github",
       "skillPath": "skills/humanizer/SKILL.md",
       "computedHash": "34a38e6acc60d4529612d41ffe740bca0060d3c5e89e2a0d24ae795f67157fbb"
+    },
+    "qa-execution": {
+      "source": "pedronauck/skills",
+      "sourceType": "github",
+      "skillPath": "skills/qa-execution/SKILL.md",
+      "computedHash": "1e0d0aa6fea29d814d62ea5513a8f2411a560bb62acc499aa411c72eb537c8ec"
+    },
+    "qa-report": {
+      "source": "pedronauck/skills",
+      "sourceType": "github",
+      "skillPath": "skills/qa-report/SKILL.md",
+      "computedHash": "231866d5f491bb0f4dcc3c999362a942bd2e26b5b9289c1ced66bc8433a3e2c4"
     }
   }
 }

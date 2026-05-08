@@ -125,12 +125,13 @@ func newFSCKCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
 				return err
 			}
 			if opts.JSON {
-				return sidecar.PrintJSON(stdout, result)
+				return printJSONStatus(stdout, result, result.OK, "skeeper fsck failed")
 			}
 			if result.OK {
 				_, err = fmt.Fprintln(stdout, "skeeper: working tree matches skeeper.lock")
 				return err
 			}
+			printDiffSummary(stdout, sidecarFSCKSummary(result))
 			for _, diag := range result.Diagnostics {
 				if _, err := fmt.Fprintf(stdout, "%s: %s\n", diag.Code, diag.Message); err != nil {
 					return err
@@ -155,7 +156,7 @@ func newVerifyCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
 				return err
 			}
 			if opts.JSON {
-				return sidecar.PrintJSON(stdout, result)
+				return printJSONStatus(stdout, result, result.OK, "skeeper verify failed")
 			}
 			if result.OK {
 				_, err = fmt.Fprintln(stdout, "skeeper: lock verified")
@@ -205,7 +206,7 @@ func newHooksCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
 				return err
 			}
 			if checkJSON {
-				return sidecar.PrintJSON(stdout, result)
+				return printJSONStatus(stdout, result, result.OK, "skeeper hooks check failed")
 			}
 			if result.OK {
 				_, err = fmt.Fprintln(stdout, "skeeper: hooks ok")

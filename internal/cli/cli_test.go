@@ -11,6 +11,8 @@ import (
 
 	"github.com/compozy/skeeper/internal/cli"
 	"github.com/compozy/skeeper/internal/config"
+	"github.com/compozy/skeeper/internal/gitexec"
+	"github.com/compozy/skeeper/internal/sidecar"
 )
 
 func TestExecute_VersionCommand(t *testing.T) {
@@ -48,6 +50,8 @@ func TestExecute_HelpListsSidecarCommands(t *testing.T) {
 			"init",
 			"hydrate",
 			"sync",
+			"reconcile",
+			"diff",
 			"adopt",
 			"untrack",
 			"pattern",
@@ -55,6 +59,8 @@ func TestExecute_HelpListsSidecarCommands(t *testing.T) {
 			"verify",
 			"hooks",
 			"merge-driver",
+			"rescue",
+			"update",
 			"repair",
 			"status",
 			"log",
@@ -75,6 +81,8 @@ func TestExecute_SubcommandHelp(t *testing.T) {
 		{"init"},
 		{"hydrate"},
 		{"sync"},
+		{"reconcile"},
+		{"diff"},
 		{"adopt"},
 		{"untrack"},
 		{"pattern"},
@@ -86,6 +94,10 @@ func TestExecute_SubcommandHelp(t *testing.T) {
 		{"hooks", "install"},
 		{"hooks", "check"},
 		{"merge-driver"},
+		{"rescue"},
+		{"rescue", "list"},
+		{"rescue", "restore"},
+		{"update"},
 		{"repair"},
 		{"repair", "status"},
 		{"repair", "resume"},
@@ -192,6 +204,69 @@ func TestExecute_InitRejectsEmptyNamespaceFlag(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, config.Filename)); !os.IsNotExist(err) {
 		t.Fatalf("expected config not to be written, stat err=%v", err)
+	}
+}
+
+func TestExecute_JSONFailuresReturnNonZero(t *testing.T) {
+	root := setupCLISkeeperProject(t)
+	t.Chdir(root)
+	writeCLITestFile(t, root, "src/auth/SPEC.md", "# Drift\n")
+
+	for _, command := range [][]string{
+		{"fsck", "--json"},
+		{"hydrate", "--json"},
+		{"update", "--no-git", "--json"},
+	} {
+		t.Run(strings.Join(command, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.Execute(context.Background(), command, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("expected non-zero exit code, stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), `"ok": false`) {
+				t.Fatalf("expected JSON failure body, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func setupCLISkeeperProject(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	remote := filepath.Join(t.TempDir(), "shared-specs.git")
+	git(t, "", "init", "--bare", "--initial-branch=main", remote)
+	git(t, root, "init", "-b", "main")
+	git(t, root, "config", "user.email", "skeeper-test@example.com")
+	git(t, root, "config", "user.name", "Skeeper Test")
+	cfg := config.Config{
+		Sidecar: remote,
+		Namespaces: []config.Namespace{{
+			Name:     "project",
+			Patterns: []string{"**/SPEC.md"},
+		}},
+	}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	writeCLITestFile(t, root, "README.md", "# project\n")
+	git(t, root, "add", "README.md", config.Filename)
+	git(t, root, "commit", "-m", "bootstrap")
+	writeCLITestFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(context.Background(), root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	return root
+}
+
+func writeCLITestFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rel, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", rel, err)
 	}
 }
 

@@ -188,6 +188,13 @@ func TestServiceVerifyAndFSCKUseLockfile(t *testing.T) {
 	if fsck.OK || len(fsck.Diagnostics) == 0 || fsck.Diagnostics[0].Code != "fsck.working_tree_drift" {
 		t.Fatalf("expected fsck drift diagnostic: %#v", fsck)
 	}
+	if len(fsck.Namespaces) != 1 || len(fsck.Namespaces[0].Paths) == 0 {
+		t.Fatalf("expected fsck path-level drift: %#v", fsck)
+	}
+	if fsck.Namespaces[0].Paths[0].Path != "src/auth/SPEC.md" ||
+		fsck.Namespaces[0].Paths[0].Class != "local_modified" {
+		t.Fatalf("unexpected fsck path diff: %#v", fsck.Namespaces[0].Paths)
+	}
 
 	data, err := os.ReadFile(filepath.Join(root, "skeeper.lock"))
 	if err != nil {
@@ -209,6 +216,328 @@ func TestServiceVerifyAndFSCKUseLockfile(t *testing.T) {
 	}
 	if verify.OK || len(verify.Diagnostics) == 0 || verify.Diagnostics[0].Code != "lock.digest_mismatch" {
 		t.Fatalf("expected verify mismatch diagnostic: %#v", verify)
+	}
+}
+
+func TestServiceHydrateBlocksLocalOnlyByDefaultAndPrunesToRescue(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	writeFile(t, root, "src/local/SPEC.md", "# Local only\n")
+
+	blocked, err := service.Hydrate(ctx, root)
+	if err != nil {
+		t.Fatalf("hydrate blocked result: %v", err)
+	}
+	if blocked.OK || len(blocked.Diagnostics) == 0 {
+		t.Fatalf("expected blocked hydrate result: %#v", blocked)
+	}
+	if _, err := os.Stat(filepath.Join(root, "src/local/SPEC.md")); err != nil {
+		t.Fatalf("blocked hydrate must preserve local file: %v", err)
+	}
+
+	pruned, err := service.Hydrate(ctx, root, sidecar.HydrateOptions{PruneLocal: true})
+	if err != nil {
+		t.Fatalf("hydrate prune: %v", err)
+	}
+	if !pruned.OK || pruned.Rescue == nil || len(pruned.Rescue.Files) != 1 {
+		t.Fatalf("expected prune rescue: %#v", pruned)
+	}
+	if _, err := os.Stat(filepath.Join(root, "src/local/SPEC.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected local-only file moved to rescue, stat err=%v", err)
+	}
+	rescues, err := service.RescueList(ctx, root)
+	if err != nil {
+		t.Fatalf("rescue list: %v", err)
+	}
+	if len(rescues.Rescues) != 1 {
+		t.Fatalf("expected one rescue manifest: %#v", rescues)
+	}
+	restored, err := service.RescueRestore(
+		ctx,
+		root,
+		pruned.Rescue.ID,
+		[]string{"src/local/SPEC.md"},
+		sidecar.RescueRestoreOptions{},
+	)
+	if err != nil {
+		t.Fatalf("rescue restore: %v", err)
+	}
+	if len(restored.Files) != 1 {
+		t.Fatalf("expected restored file: %#v", restored)
+	}
+	assertFile(t, filepath.Join(root, "src/local/SPEC.md"), "# Local only\n")
+}
+
+func TestServiceReconcileAdoptLocalPublishesLocalOnlyFiles(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	writeFile(t, root, "src/local/SPEC.md", "# Local only\n")
+
+	result, err := service.Reconcile(ctx, root, sidecar.ReconcileOptions{AdoptLocal: true})
+	if err != nil {
+		t.Fatalf("reconcile adopt local: %v", err)
+	}
+	if !result.OK || result.Hydrate == nil {
+		t.Fatalf("expected successful reconcile: %#v", result)
+	}
+	assertSidecarFile(t, remote, "project/__branches__/main", "project/src/local/SPEC.md", "# Local only\n")
+	fsck, err := service.FSCK(ctx, root, sidecar.FSCKOptions{})
+	if err != nil {
+		t.Fatalf("fsck after adopt: %v", err)
+	}
+	if !fsck.OK {
+		t.Fatalf("expected fsck ok after adopt: %#v", fsck)
+	}
+}
+
+func TestServiceFSCKClassifiesConfigUnownedAndNamespaceRemoved(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	cfg.Namespaces[0].Patterns = []string{"docs/**"}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatalf("save config-unowned config: %v", err)
+	}
+	fsck, err := service.FSCK(ctx, root, sidecar.FSCKOptions{})
+	if err != nil {
+		t.Fatalf("fsck config-unowned: %v", err)
+	}
+	if fsck.OK || fsck.Namespaces[0].Counts.ConfigUnowned != 1 {
+		t.Fatalf("expected config_unowned drift: %#v", fsck)
+	}
+
+	cfg.Namespaces[0].Name = "other"
+	cfg.Namespaces[0].Patterns = []string{"**/SPEC.md"}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatalf("save namespace-removed config: %v", err)
+	}
+	fsck, err = service.FSCK(ctx, root, sidecar.FSCKOptions{})
+	if err != nil {
+		t.Fatalf("fsck namespace-removed: %v", err)
+	}
+	if fsck.OK || fsck.Namespaces[0].Counts.NamespaceRemoved != 1 {
+		t.Fatalf("expected namespace_removed drift: %#v", fsck)
+	}
+}
+
+func TestServiceHydratePolicyFailsClosedOnMixedRuleActions(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md", ".codex/ledger/**"})
+	cfg.Namespaces[0].Hydrate = config.HydratePolicy{
+		OnLocalOnly: "prune_to_rescue",
+		Rules: []config.HydrateRule{{
+			Pattern:     ".codex/ledger/**",
+			OnLocalOnly: "keep",
+		}},
+	}
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	writeFile(t, root, "src/local/SPEC.md", "# Local only\n")
+	writeFile(t, root, ".codex/ledger/session.md", "# Ledger\n")
+
+	result, err := service.Hydrate(ctx, root)
+	if err == nil {
+		t.Fatalf("expected mixed policy error, got result %#v", result)
+	}
+	assertFile(t, filepath.Join(root, "src/local/SPEC.md"), "# Local only\n")
+	assertFile(t, filepath.Join(root, ".codex/ledger/session.md"), "# Ledger\n")
+}
+
+func TestServiceUpdateNoGitBlocksAndPrunesLocalOnly(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	writeFile(t, root, "src/local/SPEC.md", "# Local only\n")
+
+	blocked, err := service.Update(ctx, root, sidecar.UpdateOptions{NoGit: true})
+	if err != nil {
+		t.Fatalf("update blocked: %v", err)
+	}
+	if blocked.OK || blocked.Hydrate.Plan.Namespaces[0].Counts.LocalOnly != 1 {
+		t.Fatalf("expected update to report hydrate drift: %#v", blocked)
+	}
+
+	pruned, err := service.Update(ctx, root, sidecar.UpdateOptions{NoGit: true, Reconcile: "prune-local"})
+	if err != nil {
+		t.Fatalf("update prune: %v", err)
+	}
+	if !pruned.OK || pruned.Hydrate.Rescue == nil {
+		t.Fatalf("expected update prune success with rescue: %#v", pruned)
+	}
+	if _, err := os.Stat(filepath.Join(root, "src/local/SPEC.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected local-only file moved to rescue, stat err=%v", err)
+	}
+}
+
+func TestServiceHydrateTheirsRescuesLocalModifiedFile(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Base\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	writeFile(t, root, "src/auth/SPEC.md", "# Local\n")
+
+	result, err := service.Hydrate(ctx, root, sidecar.HydrateOptions{Theirs: true})
+	if err != nil {
+		t.Fatalf("hydrate theirs: %v", err)
+	}
+	if !result.OK || result.Rescue == nil || len(result.Rescue.Files) != 1 {
+		t.Fatalf("expected successful theirs hydrate with rescue: %#v", result)
+	}
+	assertFile(t, filepath.Join(root, "src/auth/SPEC.md"), "# Base\n")
+	restored, err := service.RescueRestore(
+		ctx,
+		root,
+		result.Rescue.ID,
+		[]string{"src/auth/SPEC.md"},
+		sidecar.RescueRestoreOptions{Overwrite: true},
+	)
+	if err != nil {
+		t.Fatalf("restore rescued local: %v", err)
+	}
+	if len(restored.Files) != 1 {
+		t.Fatalf("expected rescued local file: %#v", restored)
+	}
+	assertFile(t, filepath.Join(root, "src/auth/SPEC.md"), "# Local\n")
+}
+
+func TestServiceHydrateOursKeepsLocalModifiedAndRestoresMissing(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth base\n")
+	writeFile(t, root, "src/billing/SPEC.md", "# Billing base\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth local\n")
+	if err := os.Remove(filepath.Join(root, "src/billing/SPEC.md")); err != nil {
+		t.Fatalf("remove billing spec: %v", err)
+	}
+
+	result, err := service.Hydrate(ctx, root, sidecar.HydrateOptions{Ours: true})
+	if err != nil {
+		t.Fatalf("hydrate ours: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("expected ours hydrate to adopt local changes: %#v", result)
+	}
+	assertFile(t, filepath.Join(root, "src/auth/SPEC.md"), "# Auth local\n")
+	assertFile(t, filepath.Join(root, "src/billing/SPEC.md"), "# Billing base\n")
+	assertSidecarFile(t, remote, "project/__branches__/main", "project/src/auth/SPEC.md", "# Auth local\n")
+}
+
+func TestServiceHydrateMergeMaterializesConflictMarkers(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "title: base\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync base: %v", err)
+	}
+	journalPath := filepath.Join(root, ".git", "skeeper", "hydration.json")
+	baseJournal, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read base hydration journal: %v", err)
+	}
+
+	writeFile(t, root, "src/auth/SPEC.md", "title: sidecar\n")
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync sidecar change: %v", err)
+	}
+	if err := os.WriteFile(journalPath, baseJournal, 0o600); err != nil {
+		t.Fatalf("restore base hydration journal: %v", err)
+	}
+	writeFile(t, root, "src/auth/SPEC.md", "title: local\n")
+
+	result, err := service.Hydrate(ctx, root, sidecar.HydrateOptions{Merge: true})
+	if err != nil {
+		t.Fatalf("hydrate merge conflict: %v", err)
+	}
+	if result.OK || result.FSCKAfter == nil || result.FSCKAfter.OK {
+		t.Fatalf("expected unresolved merge markers to keep fsck false: %#v", result)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "src/auth/SPEC.md"))
+	if err != nil {
+		t.Fatalf("read merged file: %v", err)
+	}
+	merged := string(data)
+	for _, want := range []string{"<<<<<<<", "title: local", "=======", "title: sidecar", ">>>>>>>"} {
+		if !strings.Contains(merged, want) {
+			t.Fatalf("merged file missing %q:\n%s", want, merged)
+		}
 	}
 }
 

@@ -193,7 +193,7 @@ func (s *Store) RecordBypass(ctx context.Context, bypass Bypass) error {
 	if err != nil {
 		return fmt.Errorf("encode bypass journal: %w", err)
 	}
-	if err := atomicWriteFile(filepath.Join(s.dir, bypassFile), append(data, '\n'), 0o600); err != nil {
+	if err := atomicWriteFile(filepath.Join(s.dir, bypassFile), append(data, '\n')); err != nil {
 		return fmt.Errorf("write bypass journal: %w", err)
 	}
 	return nil
@@ -238,7 +238,7 @@ func (s *Store) writeTransaction(tx Transaction) error {
 	if err != nil {
 		return fmt.Errorf("encode transaction journal: %w", err)
 	}
-	if err := atomicWriteFile(filepath.Join(s.dir, transactionFile), append(data, '\n'), 0o600); err != nil {
+	if err := atomicWriteFile(filepath.Join(s.dir, transactionFile), append(data, '\n')); err != nil {
 		return fmt.Errorf("write transaction journal: %w", err)
 	}
 	return nil
@@ -258,7 +258,7 @@ func (s *Store) ensureDir() error {
 	return nil
 }
 
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+func atomicWriteFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
@@ -271,7 +271,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 			_ = os.Remove(tmp)
 		}
 	}()
-	if err := file.Chmod(perm); err != nil {
+	if err := file.Chmod(0o600); err != nil {
 		_ = file.Close()
 		return err
 	}

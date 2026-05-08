@@ -142,6 +142,41 @@ func TestSkeeperSharedSidecarNamespaceIsolationAcrossRepos(t *testing.T) {
 	env.assertFile(filepath.Join(beta, "src/billing/SPEC.md"), "# Beta spec\n")
 }
 
+func TestSkeeperReconcileRescuesLocalOnlyFilesEndToEnd(t *testing.T) {
+	env := newE2EEnv(t)
+	project := env.newMainRepo("project")
+	sidecarRemote := env.newBareRepo("project-specs.git")
+
+	env.run(project, "skeeper",
+		"init",
+		"--sidecar", sidecarRemote,
+		"--patterns", "**/SPEC.md",
+	)
+	env.writeFile(project, "README.md", "# project\n")
+	env.git(project, "add", "README.md", ".skeeper.yml", ".gitignore", ".gitattributes")
+	env.git(project, "commit", "-m", "bootstrap skeeper")
+	env.writeFile(project, "src/auth/SPEC.md", "# Auth\n")
+	env.run(project, "skeeper", "sync")
+
+	env.writeFile(project, "src/local/SPEC.md", "# Local only\n")
+	blocked := env.runExpectFailure(project, "skeeper", "hydrate")
+	env.assertOutputContains(blocked, "hydrate blocked")
+	diffOut := env.run(project, "skeeper", "diff", "--extra")
+	env.assertOutputContains(diffOut, "local_only")
+	env.assertOutputContains(diffOut, "src/local/SPEC.md")
+
+	reconcileOut := env.run(project, "skeeper", "reconcile", "--prune-local")
+	env.assertOutputContains(reconcileOut, "rescue:")
+	if _, err := os.Stat(filepath.Join(project, "src/local/SPEC.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected local-only spec to be moved to rescue, stat err=%v", err)
+	}
+	listOut := env.run(project, "skeeper", "rescue", "list")
+	env.assertOutputContains(listOut, "hydrate")
+	rescueID := strings.Fields(listOut)[0]
+	env.run(project, "skeeper", "rescue", "restore", rescueID, "src/local/SPEC.md")
+	env.assertFile(filepath.Join(project, "src/local/SPEC.md"), "# Local only\n")
+}
+
 func TestSkeeperStrictHookFailureAndBypassRepair(t *testing.T) {
 	env := newE2EEnv(t)
 	project := env.newMainRepo("project")

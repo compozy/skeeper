@@ -119,6 +119,121 @@ func TestBypassRoundTripAndClear(t *testing.T) {
 	}
 }
 
+func TestHydrationJournalRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store := New(t.TempDir())
+	journal := HydrationJournal{
+		SourceBranch: "main",
+		Namespaces: map[string]HydrationNamespace{
+			"repo": {
+				LockCommit: "abc123",
+				Files: map[string]HydrationFile{
+					"docs/SPEC.md": {SidecarBlob: "blob123", SHA256: "hash", Size: 4},
+				},
+			},
+		},
+	}
+	if err := store.WriteHydration(context.Background(), journal); err != nil {
+		t.Fatalf("write hydration: %v", err)
+	}
+	got, ok, err := store.LoadHydration(context.Background())
+	if err != nil {
+		t.Fatalf("load hydration: %v", err)
+	}
+	if !ok || got.Version != 1 || got.SourceBranch != "main" {
+		t.Fatalf("unexpected journal: %#v ok=%v", got, ok)
+	}
+	if got.Namespaces["repo"].Files["docs/SPEC.md"].SidecarBlob != "blob123" {
+		t.Fatalf("hydration file mismatch: %#v", got.Namespaces)
+	}
+}
+
+func TestRescueCreateListAndRestore(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store := New(filepath.Join(t.TempDir(), "state"))
+	writeStateTestFile(t, root, "docs/SPEC.md", "# Spec\n")
+	manifest, err := store.CreateRescue(context.Background(), root, "test", []RescueCandidate{
+		{Path: "docs/SPEC.md", Class: "local_only"},
+	})
+	if err != nil {
+		t.Fatalf("create rescue: %v", err)
+	}
+	if len(manifest.Files) != 1 {
+		t.Fatalf("unexpected manifest: %#v", manifest)
+	}
+	if _, err := os.Stat(filepath.Join(root, "docs/SPEC.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected rescued file removed from root, stat err=%v", err)
+	}
+	list, err := store.ListRescues(context.Background())
+	if err != nil {
+		t.Fatalf("list rescues: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != manifest.ID {
+		t.Fatalf("unexpected rescue list: %#v", list)
+	}
+	restored, err := store.RestoreRescue(context.Background(), root, manifest.ID, nil, false)
+	if err != nil {
+		t.Fatalf("restore rescue: %v", err)
+	}
+	if len(restored.Files) != 1 {
+		t.Fatalf("unexpected restored manifest: %#v", restored)
+	}
+	assertStateTestFile(t, filepath.Join(root, "docs/SPEC.md"), "# Spec\n")
+}
+
+func TestRescueRestoreRejectsTamperedManifestPaths(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store := New(filepath.Join(t.TempDir(), "state"))
+	writeStateTestFile(t, root, "docs/SPEC.md", "# Spec\n")
+	manifest, err := store.CreateRescue(context.Background(), root, "test", []RescueCandidate{
+		{Path: "docs/SPEC.md", Class: "local_only"},
+	})
+	if err != nil {
+		t.Fatalf("create rescue: %v", err)
+	}
+	manifest.Files[0].OriginalPath = "../escape.md"
+	if err := store.writeRescueManifest(manifest); err != nil {
+		t.Fatalf("rewrite rescue manifest: %v", err)
+	}
+	if _, err := store.RestoreRescue(context.Background(), root, manifest.ID, nil, false); err == nil {
+		t.Fatal("expected tampered manifest restore to fail")
+	}
+	manifest.Files[0].OriginalPath = "docs/../../escape.md"
+	if err := store.writeRescueManifest(manifest); err != nil {
+		t.Fatalf("rewrite multi-segment rescue manifest: %v", err)
+	}
+	if _, err := store.RestoreRescue(context.Background(), root, manifest.ID, nil, false); err == nil {
+		t.Fatal("expected multi-segment tampered manifest restore to fail")
+	}
+}
+
+func writeStateTestFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rel, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", rel, err)
+	}
+}
+
+func assertStateTestFile(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if string(data) != want {
+		t.Fatalf("file mismatch: got %q want %q", string(data), want)
+	}
+}
+
 func assertFileMode(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
 	info, err := os.Stat(path)

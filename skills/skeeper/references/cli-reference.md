@@ -26,7 +26,18 @@ Creating a fresh sidecar requires `gh` on `PATH`. Reusing an existing one requir
 
 ## `skeeper hydrate`
 
-Restore matched spec files into the working tree from the sidecar commits recorded in `skeeper.lock`. Used on fresh clones, after bisects, and when the working copy diverges from the lock. Takes no flags. Always reads from the locked commit, never the latest branch tip.
+Restore matched spec files into the working tree from the sidecar commits recorded in `skeeper.lock`. Used on fresh clones, after bisects, and when the working copy diverges from the lock. Always reads from the locked commit, never the latest branch tip. The default mode fails closed when local managed files would be overwritten or left orphaned.
+
+| Flag            | Description                                                 |
+| --------------- | ----------------------------------------------------------- |
+| `--dry-run`     | Show the plan without writing files                         |
+| `--json`        | Machine-readable output                                     |
+| `--keep-local`  | Restore safe files while leaving local drift untouched      |
+| `--adopt-local` | Restore safe files, then publish local drift with `sync`    |
+| `--prune-local` | Move local-only files to `.git/skeeper/rescue/` first       |
+| `--merge`       | Three-way merge conflicts using the hydration journal       |
+| `--ours`        | Resolve conflicts using local worktree content              |
+| `--theirs`      | Resolve conflicts using locked sidecar content after rescue |
 
 ## `skeeper sync`
 
@@ -92,6 +103,8 @@ Show sidecar URL, source branch, lock state, per-namespace digests, repair state
 
 Per-namespace block reports: `name`, `branch`, locked SHA, last sync SHA + age, remote, tracked-file count.
 
+`status --json` separates the locked sidecar commit, remote tip, local sidecar branch tip, and sidecar worktree HEAD. A stale `.skeeper` checkout is reported as clone state instead of lock verification failure when the remote tip still matches the lock.
+
 ## `skeeper log <path>`
 
 Show sidecar history for a single spec file.
@@ -103,7 +116,7 @@ Show sidecar history for a single spec file.
 
 ## `skeeper fsck`
 
-Compare working-tree specs against the locked sidecar content. Read-only; never mutates files or refs.
+Compare working-tree specs against the locked sidecar content. Read-only; never mutates files or refs. JSON output includes per-namespace exact paths and classes.
 
 | Flag                       | Description                  |
 | -------------------------- | ---------------------------- |
@@ -111,6 +124,35 @@ Compare working-tree specs against the locked sidecar content. Read-only; never 
 | `--source-branch <branch>` | Expected source branch       |
 
 Diagnostic codes are stable identifiers (e.g. `lock_missing`, `digest_mismatch`) suitable for CI assertions.
+
+## `skeeper diff`
+
+List per-path drift between current managed files and `skeeper.lock`.
+
+| Flag                 | Description                            |
+| -------------------- | -------------------------------------- |
+| `--json`             | Machine-readable output                |
+| `--namespace <name>` | Filter to one namespace                |
+| `--class <class>`    | Repeatable class filter                |
+| `--extra`            | Shortcut for `local_only`              |
+| `--missing`          | Shortcut for `missing_local`           |
+| `--modified`         | Shortcut for modified/conflict classes |
+
+Classes include `unchanged`, `missing_local`, `local_only`, `local_modified`, `sidecar_modified`, `both_modified_conflict`, `namespace_removed`, and `config_unowned`.
+
+## `skeeper reconcile`
+
+Inspect or resolve drift explicitly.
+
+| Flag            | Description                                              |
+| --------------- | -------------------------------------------------------- |
+| `--dry-run`     | Show the plan without writing files                      |
+| `--json`        | Machine-readable output                                  |
+| `--adopt-local` | Publish local drift into the sidecar and update the lock |
+| `--prune-local` | Move local-only files to rescue before restoring         |
+| `--merge`       | Three-way merge conflicts using the hydration journal    |
+| `--ours`        | Resolve conflicts using local worktree content           |
+| `--theirs`      | Resolve conflicts using locked sidecar content           |
 
 ## `skeeper verify`
 
@@ -137,6 +179,35 @@ Validate that the managed hook blocks are present, that `pre-commit` is ordered 
 | Flag     | Description             |
 | -------- | ----------------------- |
 | `--json` | Machine-readable output |
+
+## `skeeper rescue list`
+
+List rescue manifests under `.git/skeeper/rescue/`.
+
+| Flag     | Description             |
+| -------- | ----------------------- |
+| `--json` | Machine-readable output |
+
+## `skeeper rescue restore <id> [path...]`
+
+Restore files from a rescue manifest. Without paths, restores every file in that manifest.
+
+| Flag          | Description                      |
+| ------------- | -------------------------------- |
+| `--json`      | Machine-readable output          |
+| `--overwrite` | Replace existing restore targets |
+
+## `skeeper update`
+
+Run the agent-friendly clone update workflow: fetch and fast-forward the main repository when safe, verify the lock, hydrate safely, run fsck, install/check hooks, and report the final state.
+
+| Flag                 | Description                                                      |
+| -------------------- | ---------------------------------------------------------------- |
+| `--json`             | Machine-readable output                                          |
+| `--no-git`           | Skip main-repository fetch/fast-forward                          |
+| `--reconcile <mode>` | `report`, `keep-local`, `adopt-local`, `prune-local`, or `merge` |
+| `--ours`             | Resolve conflicts using local worktree content                   |
+| `--theirs`           | Resolve conflicts using locked sidecar content after rescue      |
 
 ## `skeeper merge-driver [base current other]`
 
@@ -173,6 +244,8 @@ Print Skeeper's build metadata: semver tag, commit SHA, and build date (from `-X
 - `<repo>/skeeper.lock` — committed; structured lockfile keyed by namespace.
 - `<repo>/.git/skeeper/transaction.json` — local-only resumable transaction.
 - `<repo>/.git/skeeper/bypass.json` — local-only audited bypass entry.
+- `<repo>/.git/skeeper/hydration.json` — local-only base journal for merge-aware hydrate/reconcile.
+- `<repo>/.git/skeeper/rescue/<id>/` — local-only files preserved before prune/overwrite operations.
 - `<repo>/.skeeper/` — gitignored worktree of the sidecar checkout.
 - `<repo>/.gitattributes` — managed entry routing `skeeper.lock` through `skeeper merge-driver`.
 - `<repo>/.gitignore` — managed `# >>> skeeper >>>` block listing namespace patterns and `.skeeper/`.

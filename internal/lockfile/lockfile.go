@@ -165,14 +165,13 @@ func (s *JSONStore) populateTreeRecordContent(
 		input.WriteString(record.Object)
 		input.WriteByte('\n')
 	}
-	out, err := s.runner.Run(
+	out, err := s.runner.RunWithInput(
 		ctx,
 		sidecarDir,
-		"sh",
-		"-c",
-		"printf '%s' \"$1\" | git cat-file --batch",
-		"sh",
 		input.String(),
+		"git",
+		"cat-file",
+		"--batch",
 	)
 	if err != nil {
 		return fmt.Errorf("read sidecar blobs with git cat-file: %w", err)
