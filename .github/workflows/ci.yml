@@ -153,7 +153,9 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@latest
 
       - name: Build local Skeeper binary
-        run: go build -o bin/skeeper ./cmd/skeeper
+        run: |
+          go build -o bin/skeeper ./cmd/skeeper
+          echo "${GITHUB_WORKSPACE}/bin" >> "$GITHUB_PATH"
 
       - name: Prepare hermetic sidecar project
         id: fixture
