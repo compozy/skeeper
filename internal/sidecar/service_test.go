@@ -220,47 +220,49 @@ func TestServiceVerifyAndFSCKUseLockfile(t *testing.T) {
 }
 
 func TestServiceFSCKHandlesDuplicateSidecarBlobs(t *testing.T) {
-	setGitIdentity(t)
+	t.Run("Should handle duplicate sidecar blobs", func(t *testing.T) {
+		setGitIdentity(t)
 
-	ctx := context.Background()
-	root := newMainRepo(t)
-	remote := newBareRepo(t)
-	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
-	bootstrapRepo(t, root, cfg)
-	writeFile(t, root, "src/auth/SPEC.md", "# Shared\n")
-	writeFile(t, root, "src/billing/SPEC.md", "# Shared\n")
+		ctx := context.Background()
+		root := newMainRepo(t)
+		remote := newBareRepo(t)
+		cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+		bootstrapRepo(t, root, cfg)
+		writeFile(t, root, "src/auth/SPEC.md", "# Shared\n")
+		writeFile(t, root, "src/billing/SPEC.md", "# Shared\n")
 
-	service := sidecar.New(&gitexec.ExecRunner{})
-	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
+		service := sidecar.New(&gitexec.ExecRunner{})
+		if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+			t.Fatalf("sync: %v", err)
+		}
 
-	fsck, err := service.FSCK(ctx, root, sidecar.FSCKOptions{})
-	if err != nil {
-		t.Fatalf("fsck: %v", err)
-	}
-	if !fsck.OK {
-		t.Fatalf("expected duplicate-content specs to fsck clean: %#v", fsck)
-	}
+		fsck, err := service.FSCK(ctx, root, sidecar.FSCKOptions{})
+		if err != nil {
+			t.Fatalf("fsck: %v", err)
+		}
+		if !fsck.OK {
+			t.Fatalf("expected duplicate-content specs to fsck clean: %#v", fsck)
+		}
 
-	journalPath := filepath.Join(root, ".git", "skeeper", "hydration.json")
-	data, err := os.ReadFile(journalPath)
-	if err != nil {
-		t.Fatalf("read hydration journal: %v", err)
-	}
-	var journal state.HydrationJournal
-	if err := json.Unmarshal(data, &journal); err != nil {
-		t.Fatalf("decode hydration journal: %v", err)
-	}
-	files := journal.Namespaces["project"].Files
-	auth := files["src/auth/SPEC.md"]
-	billing := files["src/billing/SPEC.md"]
-	if auth.SHA256 == "" || billing.SHA256 == "" {
-		t.Fatalf("expected duplicate blob entries to keep sha256: %#v", files)
-	}
-	if auth.SHA256 != billing.SHA256 || auth.SidecarBlob != billing.SidecarBlob {
-		t.Fatalf("expected duplicate files to share digest and blob: %#v", files)
-	}
+		journalPath := filepath.Join(root, ".git", "skeeper", "hydration.json")
+		data, err := os.ReadFile(journalPath)
+		if err != nil {
+			t.Fatalf("read hydration journal: %v", err)
+		}
+		var journal state.HydrationJournal
+		if err := json.Unmarshal(data, &journal); err != nil {
+			t.Fatalf("decode hydration journal: %v", err)
+		}
+		files := journal.Namespaces["project"].Files
+		auth := files["src/auth/SPEC.md"]
+		billing := files["src/billing/SPEC.md"]
+		if auth.SHA256 == "" || billing.SHA256 == "" {
+			t.Fatalf("expected duplicate blob entries to keep sha256: %#v", files)
+		}
+		if auth.SHA256 != billing.SHA256 || auth.SidecarBlob != billing.SidecarBlob {
+			t.Fatalf("expected duplicate files to share digest and blob: %#v", files)
+		}
+	})
 }
 
 func TestServiceHydrateBlocksLocalOnlyByDefaultAndPrunesToRescue(t *testing.T) {
