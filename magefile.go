@@ -114,6 +114,11 @@ func Build() error {
 	return sh.RunV("go", "build", "-trimpath", "-ldflags", buildLDFlags(), "-o", out, "./cmd/skeeper")
 }
 
+// Install installs the application binary into GOBIN/GOPATH/bin with version ldflags.
+func Install() error {
+	return sh.RunV("go", "install", "-trimpath", "-ldflags", buildLDFlags(), "./cmd/skeeper")
+}
+
 // Verify runs the blocking gate: fmt -> lint -> test -> build.
 func Verify() {
 	mg.SerialDeps(Fmt, Lint, Test, Build)

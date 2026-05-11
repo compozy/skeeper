@@ -4,7 +4,7 @@ MAGE_RUN = go run github.com/magefile/mage@$(MAGE_VERSION)
 DOCKER_IMAGE ?= skeeper
 DOCKER_TAG ?= dev
 
-.PHONY: deps fmt lint modernize test test-integration cover build verify tools \
+.PHONY: deps fmt lint modernize test test-integration cover build install verify tools \
         bun-lint bun-fmt bun-fmt-check hooks-install release-snapshot docker-build help
 
 deps:
@@ -30,6 +30,9 @@ cover:
 
 build:
 	@$(MAGE_RUN) build
+
+install: build
+	@$(MAGE_RUN) install
 
 verify:
 	@$(MAGE_RUN) verify
