@@ -80,7 +80,7 @@ func (s *Store) Begin(ctx context.Context, tx Transaction) error {
 		return err
 	} else if ok {
 		return fmt.Errorf(
-			"transaction %s already active in phase %s; run `skeeper repair status`",
+			"transaction %s already active in phase %s; run `skeeper repair --check`",
 			current.ID,
 			current.Phase,
 		)

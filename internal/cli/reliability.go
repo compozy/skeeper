@@ -8,21 +8,40 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newAdoptCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
-	var opts sidecar.MutateOptions
+func newTrackCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
+	var opts sidecar.TrackOptions
 	cmd := &cobra.Command{
-		Use:   "adopt <path-or-glob>...",
-		Short: "Move existing specs under sidecar coverage",
-		Args:  cobra.MinimumNArgs(1),
+		Use:   "track <glob>",
+		Short: "Track a spec glob with Skeeper",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := service.Adopt(cmd.Context(), ".", args, opts)
+			result, err := service.Track(cmd.Context(), ".", args[0], opts)
 			if err != nil {
 				return err
 			}
-			return printMutateResult(stdout, "adopted", opts.JSON, result)
+			if opts.JSON {
+				return sidecar.PrintJSON(stdout, result)
+			}
+			if result.DryRun {
+				_, err = fmt.Fprintf(stdout, "skeeper: dry run would track %s\n", args[0])
+				return err
+			}
+			if result.Synced {
+				_, err = fmt.Fprintf(stdout, "skeeper: tracking %s and synced matching specs\n", args[0])
+				return err
+			}
+			_, err = fmt.Fprintf(stdout, "skeeper: tracking %s\n", args[0])
+			return err
 		},
 	}
-	addMutateFlags(cmd, &opts)
+	cmd.Flags().StringVar(&opts.Namespace, "namespace", "", "namespace to update")
+	cmd.Flags().StringArrayVar(&opts.Exclude, "exclude", nil, "exclude glob to add with the tracked glob")
+	cmd.Flags().BoolVar(&opts.Sync, "sync", false, "publish matching existing specs after tracking")
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "show the plan without writing changes")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "write machine-readable JSON output")
+	cmd.Flags().BoolVar(&opts.Force, "force", false, "allow plans that exceed configured guardrails")
+	cmd.Flags().BoolVar(&opts.Commit, "commit", false, "commit staged changes in the main repository")
+	cmd.Flags().StringVar(&opts.Message, "message", "", "main repository commit message used with --commit")
 	return cmd
 }
 
@@ -44,289 +63,57 @@ func newUntrackCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
 	return cmd
 }
 
-func newPatternCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
-	cmd := &cobra.Command{Use: "pattern", Short: "Inspect and update namespace patterns"}
-	cmd.AddCommand(newPatternTestCmd(stdout, service))
-	cmd.AddCommand(newPatternAddCmd(stdout, service))
-	return cmd
-}
-
-func newPatternTestCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
-	var opts sidecar.PatternTestOptions
+func newRepairCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
+	var opts sidecar.RepairOptions
 	cmd := &cobra.Command{
-		Use:   "test <glob>",
-		Short: "Show files a glob would match",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := service.PatternTest(cmd.Context(), ".", args[0], opts)
+		Use:   "repair",
+		Short: "Diagnose and repair local Skeeper state",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			result, err := service.Repair(cmd.Context(), ".", opts)
 			if err != nil {
 				return err
 			}
 			if opts.JSON {
-				return sidecar.PrintJSON(stdout, result)
-			}
-			if _, err := fmt.Fprintf(stdout, "namespace: %s\nglob: %s\n", result.Namespace, result.Glob); err != nil {
-				return err
-			}
-			for _, match := range result.Matches {
-				if _, err := fmt.Fprintln(stdout, match); err != nil {
+				if err := sidecar.PrintJSON(stdout, result); err != nil {
 					return err
 				}
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&opts.Namespace, "namespace", "", "namespace to test against")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "write machine-readable JSON output")
-	return cmd
-}
-
-func newPatternAddCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
-	var opts sidecar.PatternAddOptions
-	cmd := &cobra.Command{
-		Use:   "add <glob>",
-		Short: "Add a glob to a namespace",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := service.PatternAdd(cmd.Context(), ".", args[0], opts)
-			if err != nil {
-				return err
-			}
-			if opts.JSON {
-				return sidecar.PrintJSON(stdout, result)
-			}
-			if result.DryRun {
-				_, err = fmt.Fprintf(stdout, "skeeper: dry run would update %s\n", result.ConfigPath)
-				return err
-			}
-			_, err = fmt.Fprintf(stdout, "skeeper: updated %s and %s\n", result.ConfigPath, result.Gitignore)
-			return err
-		},
-	}
-	cmd.Flags().StringVar(&opts.Namespace, "namespace", "", "namespace to update")
-	cmd.Flags().StringArrayVar(&opts.Exclude, "exclude", nil, "exclude glob to add with the pattern")
-	cmd.Flags().BoolVar(&opts.AdoptExisting, "adopt-existing", false, "adopt existing files matched by the new pattern")
-	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "show the plan without writing changes")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "write machine-readable JSON output")
-	cmd.Flags().BoolVar(&opts.Force, "force", false, "allow plans that exceed configured guardrails")
-	cmd.Flags().BoolVar(&opts.Commit, "commit", false, "commit staged changes in the main repository")
-	cmd.Flags().StringVar(&opts.Message, "message", "", "main repository commit message used with --commit")
-	return cmd
-}
-
-func newFSCKCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
-	var opts sidecar.FSCKOptions
-	cmd := &cobra.Command{
-		Use:   "fsck",
-		Short: "Compare working-tree specs against skeeper.lock",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			result, err := service.FSCK(cmd.Context(), ".", opts)
-			if err != nil {
-				return err
-			}
-			if opts.JSON {
-				return printJSONStatus(stdout, result, result.OK, "skeeper fsck failed")
-			}
-			if result.OK {
-				_, err = fmt.Fprintln(stdout, "skeeper: working tree matches skeeper.lock")
-				return err
-			}
-			printDiffSummary(stdout, sidecarFSCKSummary(result))
-			for _, diag := range result.Diagnostics {
-				if _, err := fmt.Fprintf(stdout, "%s: %s\n", diag.Code, diag.Message); err != nil {
-					return err
+				if !result.OK {
+					return fmt.Errorf("skeeper repair check failed")
 				}
-			}
-			return fmt.Errorf("skeeper fsck failed")
-		},
-	}
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "write machine-readable JSON output")
-	cmd.Flags().StringVar(&opts.SourceBranch, "source-branch", "", "expected source branch")
-	return cmd
-}
-
-func newVerifyCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
-	var opts sidecar.VerifyOptions
-	cmd := &cobra.Command{
-		Use:   "verify",
-		Short: "Validate skeeper.lock against the sidecar remote",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			result, err := service.Verify(cmd.Context(), ".", opts)
-			if err != nil {
-				return err
-			}
-			if opts.JSON {
-				return printJSONStatus(stdout, result, result.OK, "skeeper verify failed")
-			}
-			if result.OK {
-				_, err = fmt.Fprintln(stdout, "skeeper: lock verified")
-				return err
-			}
-			for _, diag := range result.Diagnostics {
-				if _, err := fmt.Fprintf(stdout, "%s: %s\n", diag.Code, diag.Message); err != nil {
-					return err
-				}
-			}
-			return fmt.Errorf("skeeper verify failed")
-		},
-	}
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "write machine-readable JSON output")
-	cmd.Flags().StringVar(&opts.SourceBranch, "source-branch", "", "expected source branch")
-	cmd.Flags().BoolVar(&opts.Hook, "hook", false, "run in managed pre-push hook mode")
-	markFlagHidden(cmd, "hook")
-	return cmd
-}
-
-func newHooksCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
-	cmd := &cobra.Command{Use: "hooks", Short: "Install and check managed Git hooks"}
-	var installJSON bool
-	install := &cobra.Command{
-		Use:   "install",
-		Short: "Install managed pre-commit and pre-push hooks",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			result, err := service.HooksInstall(cmd.Context(), ".")
-			if err != nil {
-				return err
-			}
-			if installJSON {
-				return sidecar.PrintJSON(stdout, result)
-			}
-			_, err = fmt.Fprintf(stdout, "skeeper: installed hooks at %s and %s\n", result.PreCommit, result.PrePush)
-			return err
-		},
-	}
-	install.Flags().BoolVar(&installJSON, "json", false, "write machine-readable JSON output")
-	var checkJSON bool
-	check := &cobra.Command{
-		Use:   "check",
-		Short: "Check managed hook health",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			result, err := service.HooksCheck(cmd.Context(), ".")
-			if err != nil {
-				return err
-			}
-			if checkJSON {
-				return printJSONStatus(stdout, result, result.OK, "skeeper hooks check failed")
-			}
-			if result.OK {
-				_, err = fmt.Fprintln(stdout, "skeeper: hooks ok")
-				return err
-			}
-			for _, diag := range result.Diagnostics {
-				if _, err := fmt.Fprintln(stdout, diag); err != nil {
-					return err
-				}
-			}
-			return fmt.Errorf("skeeper hooks check failed")
-		},
-	}
-	check.Flags().BoolVar(&checkJSON, "json", false, "write machine-readable JSON output")
-	cmd.AddCommand(install, check)
-	return cmd
-}
-
-func newMergeDriverCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
-	var jsonOut bool
-	cmd := &cobra.Command{
-		Use:   "merge-driver [base current other]",
-		Short: "Regenerate skeeper.lock during Git merges",
-		Args: func(_ *cobra.Command, args []string) error {
-			if len(args) == 0 || len(args) == 3 {
 				return nil
 			}
-			return fmt.Errorf("merge-driver expects either no args or Git %%O %%A %%B paths")
-		},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var opts sidecar.MergeDriverOptions
-			if len(args) == 3 {
-				opts.BasePath = args[0]
-				opts.CurrentPath = args[1]
-				opts.OtherPath = args[2]
+			for _, action := range result.Actions {
+				if _, err := fmt.Fprintf(stdout, "fixed: %s\n", action.Message); err != nil {
+					return err
+				}
 			}
-			result, err := service.MergeDriver(cmd.Context(), ".", opts)
-			if err != nil {
-				return err
-			}
-			if jsonOut {
-				return sidecar.PrintJSON(stdout, result)
-			}
-			_, err = fmt.Fprintln(stdout, "skeeper: regenerated skeeper.lock")
-			return err
-		},
-	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "write machine-readable JSON output")
-	return cmd
-}
-
-func newRepairCmd(stdout io.Writer, service *sidecar.Service) *cobra.Command {
-	cmd := &cobra.Command{Use: "repair", Short: "Inspect and repair local skeeper state"}
-	var jsonOut bool
-	status := &cobra.Command{
-		Use:   "status",
-		Short: "Show local repair state",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			result, err := service.RepairStatus(cmd.Context(), ".")
-			if err != nil {
-				return err
-			}
-			if jsonOut {
-				return sidecar.PrintJSON(stdout, result)
-			}
-			if result.Transaction == nil && result.Bypass == nil {
-				_, err = fmt.Fprintln(stdout, "skeeper: no repair state")
-				return err
-			}
-			if result.Transaction != nil {
+			for _, rescue := range result.Rescues {
 				if _, err := fmt.Fprintf(
 					stdout,
-					"transaction: %s (%s)\n",
-					result.Transaction.ID,
-					result.Transaction.Phase,
+					"rescue: %s (%d file(s))\n",
+					rescue.ID,
+					len(rescue.Files),
 				); err != nil {
 					return err
 				}
 			}
-			if result.Bypass != nil {
-				_, err = fmt.Fprintf(stdout, "bypass: %s\n", result.Bypass.Reason)
+			if result.OK {
+				_, err = fmt.Fprintln(stdout, "skeeper: repair ok")
 				return err
 			}
-			return nil
-		},
-	}
-	status.Flags().BoolVar(&jsonOut, "json", false, "write machine-readable JSON output")
-	resume := &cobra.Command{
-		Use:   "resume",
-		Short: "Resume by running a fresh sync",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			result, err := service.RepairResume(cmd.Context(), ".")
-			if err != nil {
+			if _, err := fmt.Fprintln(stdout, "skeeper: repair needed"); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "skeeper: repair sync wrote %d namespace(s)\n", len(result.Namespaces))
-			return err
-		},
-	}
-	abort := &cobra.Command{
-		Use:   "abort",
-		Short: "Abort a repairable transaction before main-index mutation",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := service.RepairAbort(cmd.Context(), "."); err != nil {
-				return err
+			for _, diag := range result.Diagnostics {
+				if _, err := fmt.Fprintf(stdout, "%s: %s\n", diag.Code, diag.Message); err != nil {
+					return err
+				}
 			}
-			_, err := fmt.Fprintln(stdout, "skeeper: repair state aborted")
-			return err
+			return fmt.Errorf("skeeper repair check failed")
 		},
 	}
-	var reason string
-	recordBypass := &cobra.Command{
-		Use:    "record-bypass",
-		Hidden: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return service.RecordBypass(cmd.Context(), ".", reason)
-		},
-	}
-	recordBypass.Flags().StringVar(&reason, "reason", "pre-commit bypass", "bypass reason")
-	cmd.AddCommand(status, resume, abort, recordBypass)
+	cmd.Flags().BoolVar(&opts.Check, "check", false, "diagnose without writing safe repairs")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "write machine-readable JSON output")
 	return cmd
 }
 

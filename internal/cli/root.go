@@ -37,22 +37,16 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		SilenceErrors: false,
 	}
 	cmd.AddCommand(newInitCmd(stdout, stderr, service))
-	cmd.AddCommand(newHydrateCmd(stdout, service))
 	cmd.AddCommand(newSyncCmd(stdout, service))
-	cmd.AddCommand(newReconcileCmd(stdout, service))
-	cmd.AddCommand(newDiffCmd(stdout, service))
-	cmd.AddCommand(newAdoptCmd(stdout, service))
+	cmd.AddCommand(newPullCmd(stdout, service))
+	cmd.AddCommand(newPushCmd(stdout, service))
+	cmd.AddCommand(newRestoreCmd(stdout, service))
+	cmd.AddCommand(newTrackCmd(stdout, service))
 	cmd.AddCommand(newUntrackCmd(stdout, service))
-	cmd.AddCommand(newPatternCmd(stdout, service))
-	cmd.AddCommand(newFSCKCmd(stdout, service))
-	cmd.AddCommand(newVerifyCmd(stdout, service))
-	cmd.AddCommand(newHooksCmd(stdout, service))
-	cmd.AddCommand(newMergeDriverCmd(stdout, service))
-	cmd.AddCommand(newRescueCmd(stdout, service))
-	cmd.AddCommand(newUpdateCmd(stdout, service))
 	cmd.AddCommand(newRepairCmd(stdout, service))
 	cmd.AddCommand(newStatusCmd(stdout, service))
 	cmd.AddCommand(newLogCmd(stdout, service))
 	cmd.AddCommand(newVersionCmd(stdout))
+	cmd.AddCommand(newInternalCmd(stdout, service))
 	return cmd
 }

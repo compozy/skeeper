@@ -36,7 +36,7 @@ func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
 
 	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
 	service := sidecar.New(&gitexec.ExecRunner{})
-	result, err := service.Sync(ctx, root, sidecar.SyncOptions{})
+	result, err := service.Sync(ctx, root, sidecar.SyncOptions{Mirror: true})
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -637,6 +637,125 @@ func TestServicePatternAddUpdatesConfigAndGitignore(t *testing.T) {
 	}
 }
 
+func TestServiceTrackAddsGlobAndCanSyncExistingSpecs(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"docs/specs/**"})
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+	git(t, root, "add", "-f", "src/auth/SPEC.md")
+	git(t, root, "commit", "-m", "tracked spec before skeeper")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	result, err := service.Track(ctx, root, "src/**/SPEC.md", sidecar.TrackOptions{Sync: true})
+	if err != nil {
+		t.Fatalf("track: %v", err)
+	}
+	if !result.Synced || result.ConfigPath == "" || result.Gitignore == "" {
+		t.Fatalf("unexpected track result: %#v", result)
+	}
+	reloaded, err := config.Load(root)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if !slices.Contains(reloaded.Namespaces[0].Patterns, "src/**/SPEC.md") {
+		t.Fatalf("expected config to include tracked glob: %#v", reloaded.Namespaces[0].Patterns)
+	}
+	if out := gitOutput(t, root, "ls-files", "--", "src/auth/SPEC.md"); out != "" {
+		t.Fatalf("expected synced track to remove spec from main index, got %q", out)
+	}
+	assertSidecarFile(t, remote, "project/__branches__/main", "project/src/auth/SPEC.md", "# Auth\n")
+}
+
+func TestServiceRestorePathRestoresLockedContentWithRescue(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	writeFile(t, root, "src/auth/SPEC.md", "# Local drift\n")
+
+	result, err := service.Restore(ctx, root, sidecar.RestoreOptions{Paths: []string{"src/auth/SPEC.md"}})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if !result.OK || len(result.Restored) != 1 || result.Rescue == nil || len(result.Rescue.Files) != 1 {
+		t.Fatalf("unexpected restore result: %#v", result)
+	}
+	assertFile(t, filepath.Join(root, "src/auth/SPEC.md"), "# Auth\n")
+}
+
+func TestServiceStatusCheckReportsNextActionForDrift(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if _, err := service.HooksInstall(ctx, root); err != nil {
+		t.Fatalf("install hooks: %v", err)
+	}
+	writeFile(t, root, "src/auth/SPEC.md", "# Local drift\n")
+
+	status, err := service.Status(ctx, root, sidecar.StatusOptions{Check: true, Paths: true})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.OK || !strings.Contains(status.NextAction, "skeeper sync") {
+		t.Fatalf("expected sync next action for drift: %#v", status)
+	}
+	if len(status.Namespaces) != 1 || len(status.Namespaces[0].Paths) == 0 {
+		t.Fatalf("expected path-level drift: %#v", status.Namespaces)
+	}
+}
+
+func TestServiceRepairRefreshesHooksAndStopsOnDrift(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	root := newMainRepo(t)
+	remote := newBareRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	repaired, err := service.Repair(ctx, root, sidecar.RepairOptions{})
+	if err != nil {
+		t.Fatalf("repair hooks: %v", err)
+	}
+	if !repaired.OK || len(repaired.Actions) == 0 || repaired.Actions[0].Kind != "hooks_refreshed" {
+		t.Fatalf("expected hook repair action: %#v", repaired)
+	}
+
+	writeFile(t, root, "src/auth/SPEC.md", "# Local drift\n")
+	blocked, err := service.Repair(ctx, root, sidecar.RepairOptions{Check: true})
+	if err != nil {
+		t.Fatalf("repair check drift: %v", err)
+	}
+	if blocked.OK || len(blocked.Diagnostics) == 0 {
+		t.Fatalf("expected repair to stop on ambiguous drift: %#v", blocked)
+	}
+}
+
 func TestServiceMergeDriverWritesCanonicalLockToCurrentPath(t *testing.T) {
 	setGitIdentity(t)
 
@@ -825,7 +944,7 @@ func TestServiceSyncMirrorsDeletes(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "src/auth/SPEC.md")); err != nil {
 		t.Fatalf("remove spec: %v", err)
 	}
-	result, err := service.Sync(ctx, root, sidecar.SyncOptions{})
+	result, err := service.Sync(ctx, root, sidecar.SyncOptions{Mirror: true})
 	if err != nil {
 		t.Fatalf("delete sync: %v", err)
 	}
@@ -857,7 +976,7 @@ func TestServiceSyncUsesMultipleNamespacesAndSidecarBranches(t *testing.T) {
 
 	writeFile(t, repoA, "skills/review.md", "# Skill\n")
 	writeFile(t, repoA, "src/auth/SPEC.md", "# Repo A\n")
-	if _, err := service.Sync(ctx, repoA, sidecar.SyncOptions{}); err != nil {
+	if _, err := service.Sync(ctx, repoA, sidecar.SyncOptions{Mirror: true}); err != nil {
 		t.Fatalf("sync repo A: %v", err)
 	}
 	writeFile(t, repoB, "src/auth/SPEC.md", "# Repo B\n")
@@ -889,7 +1008,7 @@ func TestServiceSyncUsesMultipleNamespacesAndSidecarBranches(t *testing.T) {
 	if err := os.Remove(filepath.Join(repoA, "src/auth/SPEC.md")); err != nil {
 		t.Fatalf("remove repo A spec: %v", err)
 	}
-	if _, err := service.Sync(ctx, repoA, sidecar.SyncOptions{}); err != nil {
+	if _, err := service.Sync(ctx, repoA, sidecar.SyncOptions{Mirror: true}); err != nil {
 		t.Fatalf("delete sync repo A: %v", err)
 	}
 	assertSidecarMissing(t, remote, "repo/__branches__/main", "repo/src/auth/SPEC.md")
@@ -941,7 +1060,7 @@ func TestServiceSyncMovesFileWhenNamespaceExcludeChangesOwnership(t *testing.T) 
 	bootstrapRepo(t, root, singleNamespaceConfig(remote, "repo", []string{"**/*.md"}))
 	writeFile(t, root, "skills/review.md", "# Skill\n")
 	service := sidecar.New(&gitexec.ExecRunner{})
-	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{Mirror: true}); err != nil {
 		t.Fatalf("initial sync: %v", err)
 	}
 	assertSidecarFile(t, remote, "repo/__branches__/main", "repo/skills/review.md", "# Skill\n")
@@ -956,7 +1075,7 @@ func TestServiceSyncMovesFileWhenNamespaceExcludeChangesOwnership(t *testing.T) 
 	if err := config.Save(root, cfg); err != nil {
 		t.Fatalf("save updated config: %v", err)
 	}
-	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{Mirror: true}); err != nil {
 		t.Fatalf("ownership migration sync: %v", err)
 	}
 	assertSidecarMissing(t, remote, "repo/__branches__/main", "repo/skills/review.md")
@@ -1099,10 +1218,10 @@ func TestServiceSyncPullRebasesNamespacedBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync pull: %v", err)
 	}
-	if !result.Committed {
-		t.Fatal("expected sync pull to commit deletion of external-only spec")
+	if result.Committed {
+		t.Fatal("expected default sync to preserve external-only spec without a deletion commit")
 	}
-	assertSidecarMissing(t, remote, "repo-a/__branches__/main", "repo-a/external/SPEC.md")
+	assertSidecarFile(t, remote, "repo-a/__branches__/main", "repo-a/external/SPEC.md", "# External\n")
 }
 
 func TestServiceStatusReportsRemoteState(t *testing.T) {
@@ -1307,7 +1426,7 @@ func TestServiceInitUsesExistingCompatibleConfigIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read hook: %v", err)
 	}
-	if !strings.Contains(string(hook), "skeeper sync --hook") {
+	if !strings.Contains(string(hook), "skeeper internal pre-commit") {
 		t.Fatalf("expected hook to be installed, got %s", string(hook))
 	}
 }

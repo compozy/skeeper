@@ -53,7 +53,7 @@ func TestGitManagerInstallMigratesLegacyPostCommitAndKeepsPreCommitLast(t *testi
 		t.Fatalf("pre-commit bypass must fail closed:\n%s", preCommit)
 	}
 	preMerge := readFile(t, filepath.Join(hooksDir, "pre-merge-commit"))
-	if !strings.Contains(preMerge, "skeeper sync --hook") ||
+	if !strings.Contains(preMerge, "skeeper internal pre-commit") ||
 		!strings.Contains(preMerge, "pre-merge-commit bypass") {
 		t.Fatalf("pre-merge-commit hook mismatch:\n%s", preMerge)
 	}
@@ -155,20 +155,20 @@ func TestStrictHookBodies(t *testing.T) {
 	preCommit := preCommitBody(config.DefaultAllowSkipEnv)
 	for _, want := range []string{
 		"set -eu",
-		"skeeper repair record-bypass",
+		"skeeper internal record-bypass",
 		"bypass requested but audit record failed",
-		"skeeper sync --hook",
+		"skeeper internal pre-commit",
 	} {
 		if !strings.Contains(preCommit, want) {
 			t.Fatalf("pre-commit body missing %q:\n%s", want, preCommit)
 		}
 	}
 	prePush := prePushBody()
-	if !strings.Contains(prePush, "set -eu") || !strings.Contains(prePush, "skeeper verify --hook") {
+	if !strings.Contains(prePush, "set -eu") || !strings.Contains(prePush, "skeeper internal pre-push") {
 		t.Fatalf("pre-push body mismatch:\n%s", prePush)
 	}
 	preMerge := preMergeCommitBody(config.DefaultAllowSkipEnv)
-	if !strings.Contains(preMerge, "set -eu") || !strings.Contains(preMerge, "skeeper sync --hook") {
+	if !strings.Contains(preMerge, "set -eu") || !strings.Contains(preMerge, "skeeper internal pre-commit") {
 		t.Fatalf("pre-merge-commit body mismatch:\n%s", preMerge)
 	}
 }

@@ -60,6 +60,7 @@ func newInitCmd(stdout, _ io.Writer, service *sidecar.Service) *cobra.Command {
 	cmd.Flags().StringVar(&opts.Namespace, "namespace", "", "sidecar namespace for this project")
 	cmd.Flags().StringVar(&opts.Bootstrap, "bootstrap", "", "optional install command stored in .skeeper.yml")
 	cmd.Flags().StringArrayVar(&opts.Patterns, "patterns", nil, "spec glob pattern; repeat for multiple patterns")
+	cmd.Flags().StringArrayVar(&opts.Track, "track", nil, "spec glob to track during init; repeat for multiple globs")
 	return cmd
 }
 
@@ -88,5 +89,6 @@ func shouldRunInitTUI(cmd *cobra.Command) bool {
 		"namespace",
 		"bootstrap",
 		"patterns",
+		"track",
 	}, cmd.Flags().Changed)
 }

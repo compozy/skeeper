@@ -122,7 +122,7 @@ func (m *GitManager) Install(ctx context.Context, root reconcile.RepoRoot, opts 
 		"git",
 		"config",
 		"merge.skeeper-lock.driver",
-		"skeeper merge-driver %O %A %B",
+		"skeeper internal merge-driver %O %A %B",
 	); err != nil {
 		return InstallResult{}, fmt.Errorf("configure skeeper merge driver: %w", err)
 	}
@@ -172,11 +172,11 @@ func (m *GitManager) Check(ctx context.Context, root reconcile.RepoRoot) (CheckR
 func (m *GitManager) checkMergeDriverConfig(ctx context.Context, root string) error {
 	name, err := m.runner.Run(ctx, root, "git", "config", "--get", "merge.skeeper-lock.name")
 	if err != nil || strings.TrimSpace(name.Stdout) != "skeeper lockfile merge driver" {
-		return fmt.Errorf("merge_driver_unconfigured: run `skeeper hooks install`")
+		return fmt.Errorf("merge_driver_unconfigured: run `skeeper repair`")
 	}
 	driver, err := m.runner.Run(ctx, root, "git", "config", "--get", "merge.skeeper-lock.driver")
-	if err != nil || strings.TrimSpace(driver.Stdout) != "skeeper merge-driver %O %A %B" {
-		return fmt.Errorf("merge_driver_unconfigured: run `skeeper hooks install`")
+	if err != nil || strings.TrimSpace(driver.Stdout) != "skeeper internal merge-driver %O %A %B" {
+		return fmt.Errorf("merge_driver_unconfigured: run `skeeper repair`")
 	}
 	return nil
 }
@@ -184,7 +184,7 @@ func (m *GitManager) checkMergeDriverConfig(ctx context.Context, root string) er
 func preCommitBody(allowEnv string) string {
 	return fmt.Sprintf(`set -eu
 if [ "${%s:-}" = "1" ]; then
-  if ! skeeper repair record-bypass --reason "pre-commit bypass via %s=1"; then
+  if ! skeeper internal record-bypass --reason "pre-commit bypass via %s=1"; then
     echo "skeeper: bypass requested but audit record failed" >&2
     exit 1
   fi
@@ -192,7 +192,7 @@ if [ "${%s:-}" = "1" ]; then
   exit 0
 fi
 if command -v skeeper >/dev/null 2>&1; then
-  skeeper sync --hook
+  skeeper internal pre-commit
 else
   echo "skeeper: command not found; install skeeper or run '%s=1 git commit' and repair with 'skeeper sync'" >&2
   exit 1
@@ -203,7 +203,7 @@ fi
 func preMergeCommitBody(allowEnv string) string {
 	return fmt.Sprintf(`set -eu
 if [ "${%s:-}" = "1" ]; then
-  if ! skeeper repair record-bypass --reason "pre-merge-commit bypass via %s=1"; then
+  if ! skeeper internal record-bypass --reason "pre-merge-commit bypass via %s=1"; then
     echo "skeeper: bypass requested but audit record failed" >&2
     exit 1
   fi
@@ -211,7 +211,7 @@ if [ "${%s:-}" = "1" ]; then
   exit 0
 fi
 if command -v skeeper >/dev/null 2>&1; then
-  skeeper sync --hook
+  skeeper internal pre-commit
 else
   echo "skeeper: command not found; install skeeper or run '%s=1 git merge' and repair with 'skeeper sync'" >&2
   exit 1
@@ -222,7 +222,7 @@ fi
 func prePushBody() string {
 	return `set -eu
 if command -v skeeper >/dev/null 2>&1; then
-  skeeper verify --hook
+  skeeper internal pre-push
 else
   echo "skeeper: command not found; install skeeper before pushing" >&2
   exit 1
@@ -305,7 +305,7 @@ func installAttributes(path string) error {
 func checkHookLast(path, begin, end string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("%s is missing; run `skeeper hooks install`", filepath.Base(path))
+		return fmt.Errorf("%s is missing; run `skeeper repair`", filepath.Base(path))
 	}
 	content := string(data)
 	start := strings.Index(content, begin)
@@ -315,7 +315,7 @@ func checkHookLast(path, begin, end string) error {
 	}
 	after := strings.TrimSpace(content[finish+len(end):])
 	if after != "" {
-		return fmt.Errorf("%s has content after the skeeper block; run `skeeper hooks install`", filepath.Base(path))
+		return fmt.Errorf("%s has content after the skeeper block; run `skeeper repair`", filepath.Base(path))
 	}
 	return nil
 }
@@ -323,7 +323,7 @@ func checkHookLast(path, begin, end string) error {
 func checkHookContains(path, begin, end string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("%s is missing; run `skeeper hooks install`", filepath.Base(path))
+		return fmt.Errorf("%s is missing; run `skeeper repair`", filepath.Base(path))
 	}
 	content := string(data)
 	if !strings.Contains(content, begin) || !strings.Contains(content, end) {

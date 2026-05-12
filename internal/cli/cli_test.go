@@ -39,7 +39,7 @@ func TestExecute_UnknownCommand(t *testing.T) {
 }
 
 func TestExecute_HelpListsSidecarCommands(t *testing.T) {
-	t.Run("Should expose v1 sidecar command surface", func(t *testing.T) {
+	t.Run("Should expose greenfield public command surface", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		code := cli.Execute(context.Background(), []string{"--help"}, &stdout, &stderr)
 		if code != 0 {
@@ -48,21 +48,14 @@ func TestExecute_HelpListsSidecarCommands(t *testing.T) {
 		help := stdout.String()
 		for _, command := range []string{
 			"init",
-			"hydrate",
-			"sync",
-			"reconcile",
-			"diff",
-			"adopt",
-			"untrack",
-			"pattern",
-			"fsck",
-			"verify",
-			"hooks",
-			"merge-driver",
-			"rescue",
-			"update",
-			"repair",
 			"status",
+			"pull",
+			"push",
+			"sync",
+			"restore",
+			"track",
+			"untrack",
+			"repair",
 			"log",
 			"version",
 		} {
@@ -73,38 +66,46 @@ func TestExecute_HelpListsSidecarCommands(t *testing.T) {
 		if strings.Contains(help, "\n  run ") {
 			t.Fatalf("did not expect scaffold run command in help:\n%s", help)
 		}
+		for _, removed := range []string{
+			"hydrate",
+			"resolve",
+			"reconcile",
+			"diff",
+			"adopt",
+			"pattern",
+			"fsck",
+			"verify",
+			"hooks",
+			"merge-driver",
+			"rescue",
+			"update",
+			"internal",
+		} {
+			if strings.Contains(help, "\n  "+removed+" ") {
+				t.Fatalf("did not expect public help to include %q:\n%s", removed, help)
+			}
+		}
 	})
 }
 
 func TestExecute_SubcommandHelp(t *testing.T) {
 	commands := [][]string{
 		{"init"},
-		{"hydrate"},
 		{"sync"},
-		{"reconcile"},
-		{"diff"},
-		{"adopt"},
+		{"pull"},
+		{"push"},
+		{"restore"},
+		{"track"},
 		{"untrack"},
-		{"pattern"},
-		{"pattern", "test"},
-		{"pattern", "add"},
-		{"fsck"},
-		{"verify"},
-		{"hooks"},
-		{"hooks", "install"},
-		{"hooks", "check"},
-		{"merge-driver"},
-		{"rescue"},
-		{"rescue", "list"},
-		{"rescue", "restore"},
-		{"update"},
 		{"repair"},
-		{"repair", "status"},
-		{"repair", "resume"},
-		{"repair", "abort"},
 		{"status"},
 		{"log"},
 		{"version"},
+		{"internal"},
+		{"internal", "pre-commit"},
+		{"internal", "pre-push"},
+		{"internal", "merge-driver"},
+		{"internal", "record-bypass"},
 	}
 
 	for _, command := range commands {
@@ -117,6 +118,34 @@ func TestExecute_SubcommandHelp(t *testing.T) {
 			}
 			if !strings.Contains(stdout.String(), "Usage:") {
 				t.Fatalf("expected usage output, got %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestExecute_RemovedCommandsAreNotPublic(t *testing.T) {
+	for _, command := range [][]string{
+		{"hydrate"},
+		{"resolve"},
+		{"reconcile"},
+		{"diff"},
+		{"adopt"},
+		{"pattern"},
+		{"fsck"},
+		{"verify"},
+		{"hooks"},
+		{"merge-driver"},
+		{"rescue"},
+		{"update"},
+	} {
+		t.Run(strings.Join(command, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := cli.Execute(context.Background(), command, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("expected removed command to fail, stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "unknown command") {
+				t.Fatalf("expected unknown command error, got stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
 		})
 	}
@@ -207,15 +236,14 @@ func TestExecute_InitRejectsEmptyNamespaceFlag(t *testing.T) {
 	}
 }
 
-func TestExecute_JSONFailuresReturnNonZero(t *testing.T) {
+func TestExecute_JSONCheckFailuresReturnNonZero(t *testing.T) {
 	root := setupCLISkeeperProject(t)
 	t.Chdir(root)
 	writeCLITestFile(t, root, "src/auth/SPEC.md", "# Drift\n")
 
 	for _, command := range [][]string{
-		{"fsck", "--json"},
-		{"hydrate", "--json"},
-		{"update", "--no-git", "--json"},
+		{"status", "--check", "--json"},
+		{"repair", "--check", "--json"},
 	} {
 		t.Run(strings.Join(command, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

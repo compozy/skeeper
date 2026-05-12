@@ -1,5 +1,5 @@
-name: Skeeper Verify
-description: Download the released Skeeper binary and run a lockfile verification command.
+name: Skeeper Status Check
+description: Download the released Skeeper binary and run a Skeeper health check.
 
 inputs:
   version:
@@ -9,7 +9,9 @@ inputs:
   args:
     description: Arguments passed to skeeper, one argument per line.
     required: false
-    default: "verify"
+    default: |
+      status
+      --check
   binary:
     description: Existing skeeper binary to use instead of downloading a release.
     required: false
@@ -113,7 +115,13 @@ runs:
       run: |
         set -euo pipefail
         cd "$SKEEPER_WORKING_DIRECTORY"
-        mapfile -t skeeper_args <<< "$SKEEPER_ARGS"
+        mapfile -t raw_skeeper_args <<< "$SKEEPER_ARGS"
+        skeeper_args=()
+        for arg in "${raw_skeeper_args[@]}"; do
+          if [ -n "$arg" ]; then
+            skeeper_args+=("$arg")
+          fi
+        done
         skeeper "${skeeper_args[@]}"
 
     - name: Cleanup Skeeper credentials

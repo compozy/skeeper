@@ -105,7 +105,16 @@ type projectDiff struct {
 }
 
 func (s *Service) hydrate(ctx context.Context, dir string, opts HydrateOptions) (HydrateResult, error) {
-	diff, err := s.diffProject(ctx, dir, "", true)
+	return s.hydrateWithLock(ctx, dir, opts, nil)
+}
+
+func (s *Service) hydrateWithLock(
+	ctx context.Context,
+	dir string,
+	opts HydrateOptions,
+	targetLock *lockfile.Lock,
+) (HydrateResult, error) {
+	diff, err := s.diffProjectWithLock(ctx, dir, "", true, targetLock)
 	if err != nil {
 		return HydrateResult{}, err
 	}
@@ -132,7 +141,7 @@ func (s *Service) hydrate(ctx context.Context, dir string, opts HydrateOptions) 
 			"hydrate.blocked",
 			fmt.Sprintf("hydrate blocked by %d local managed file(s)", len(blocked)),
 			"",
-			"skeeper reconcile",
+			"skeeper status --paths",
 		))
 		return result, nil
 	}
@@ -163,12 +172,13 @@ func (s *Service) hydrate(ctx context.Context, dir string, opts HydrateOptions) 
 	if err := s.writeHydrationJournal(ctx, &diff); err != nil {
 		return HydrateResult{}, err
 	}
-	if opts.AdoptLocal || opts.Ours {
-		syncResult, err := s.Sync(ctx, diff.root, SyncOptions{Force: true})
-		if err != nil {
+	if targetLock != nil {
+		if err := s.locks.Write(reconcile.RepoRoot(diff.root), diff.lock); err != nil {
 			return HydrateResult{}, err
 		}
-		result.Commit = syncResult.Commit
+	}
+	if err := s.syncAfterHydrate(ctx, &diff, opts, &result); err != nil {
+		return HydrateResult{}, err
 	}
 	fsck, err := s.FSCK(ctx, diff.root, FSCKOptions{})
 	if err != nil {
@@ -177,6 +187,23 @@ func (s *Service) hydrate(ctx context.Context, dir string, opts HydrateOptions) 
 	result.FSCKAfter = &fsck
 	result.OK = fsck.OK
 	return result, nil
+}
+
+func (s *Service) syncAfterHydrate(
+	ctx context.Context,
+	diff *projectDiff,
+	opts HydrateOptions,
+	result *HydrateResult,
+) error {
+	if !opts.AdoptLocal && !opts.Ours {
+		return nil
+	}
+	syncResult, err := s.Sync(ctx, diff.root, SyncOptions{Force: true})
+	if err != nil {
+		return err
+	}
+	result.Commit = syncResult.Commit
+	return nil
 }
 
 // Reconcile reports or applies an explicit local/locked reconciliation.
@@ -213,7 +240,7 @@ func (s *Service) Reconcile(ctx context.Context, dir string, opts ReconcileOptio
 
 // Diff returns a rich working-tree diff against the lock.
 func (s *Service) Diff(ctx context.Context, dir string, opts DiffOptions) (reconcile.DiffSummary, error) {
-	diff, err := s.diffProject(ctx, dir, "", false)
+	diff, err := s.diffProject(ctx, dir, "", true)
 	if err != nil {
 		return reconcile.DiffSummary{}, err
 	}
@@ -336,6 +363,16 @@ func (s *Service) Update(ctx context.Context, dir string, opts UpdateOptions) (U
 }
 
 func (s *Service) diffProject(ctx context.Context, dir string, sourceBranch string, mutate bool) (projectDiff, error) {
+	return s.diffProjectWithLock(ctx, dir, sourceBranch, mutate, nil)
+}
+
+func (s *Service) diffProjectWithLock(
+	ctx context.Context,
+	dir string,
+	sourceBranch string,
+	mutate bool,
+	targetLock *lockfile.Lock,
+) (projectDiff, error) {
 	root, cfg, store, err := s.loadProject(ctx, dir)
 	if err != nil {
 		return projectDiff{}, err
@@ -343,9 +380,17 @@ func (s *Service) diffProject(ctx context.Context, dir string, sourceBranch stri
 	if err := s.prepareDiffSidecar(ctx, root, cfg, mutate); err != nil {
 		return projectDiff{}, err
 	}
-	lock, err := s.locks.Load(reconcile.RepoRoot(root))
-	if err != nil {
-		return projectDiff{}, err
+	var lock lockfile.Lock
+	if targetLock != nil {
+		lock = lockfile.Normalize(*targetLock)
+		if err := lockfile.Validate(lock); err != nil {
+			return projectDiff{}, err
+		}
+	} else {
+		lock, err = s.locks.Load(reconcile.RepoRoot(root))
+		if err != nil {
+			return projectDiff{}, err
+		}
 	}
 	sidecarDir := sidecarPath(root)
 	plan, err := s.planner.PlanFSCK(
@@ -393,7 +438,7 @@ func (s *Service) prepareDiffSidecar(ctx context.Context, root string, cfg confi
 		return nil
 	}
 	if !exists(filepath.Join(root, DirName, ".git")) {
-		return fmt.Errorf("sidecar clone is missing; run `skeeper hydrate`")
+		return fmt.Errorf("sidecar clone is missing; run `skeeper sync`")
 	}
 	return nil
 }
@@ -968,7 +1013,7 @@ func hydratePolicyForPath(namespace config.Namespace, path reconcile.PathDiff) (
 			return intent, nil
 		case hydratePolicyKeep, hydratePolicyAdopt:
 			return hydratePolicyNone, fmt.Errorf(
-				"hydrate policy %q cannot resolve conflict for %s; use --ours, --theirs, or --merge",
+				"hydrate policy %q cannot resolve conflict for %s; inspect the path with `skeeper status --paths`",
 				value,
 				path.Path,
 			)
@@ -1051,7 +1096,7 @@ func (s *Service) fastForwardMain(ctx context.Context, root string) (bool, error
 	if dirty, err := s.dirty(ctx, root); err != nil {
 		return false, err
 	} else if dirty {
-		return false, fmt.Errorf("main repository has local changes; commit or stash before `skeeper update`")
+		return false, fmt.Errorf("main repository has local changes; commit or stash before `skeeper pull`")
 	}
 	branch, err := s.git.CurrentBranch(ctx, root)
 	if err != nil {

@@ -6,7 +6,7 @@ Authoritative reference for `.skeeper.yml`. Cross-checked against `internal/conf
 
 - `.skeeper.yml` lives at the repository root.
 - It is committed to the main repository, alongside `skeeper.lock`.
-- It is created by `skeeper init` and edited in place by `skeeper pattern add`.
+- It is created by `skeeper init` and edited in place by `skeeper track`.
 - It is decoded with `KnownFields(true)` — unknown keys produce a hard error, not a warning.
 
 ## Top-level schema
@@ -51,10 +51,10 @@ Both must be non-negative. A plan that exceeds either ceiling fails unless `--fo
 
 ## `settings.hooks`
 
-| Field              | Default        | Meaning                                                                           |
-| ------------------ | -------------- | --------------------------------------------------------------------------------- |
-| `pre_push_timeout` | `30s`          | Wall-clock budget for `skeeper verify` running inside the managed `pre-push` hook |
-| `allow_skip_env`   | `SKEEPER_SKIP` | Environment variable name that triggers the audited bypass                        |
+| Field              | Default        | Meaning                                                    |
+| ------------------ | -------------- | ---------------------------------------------------------- |
+| `pre_push_timeout` | `30s`          | Wall-clock budget for the managed `pre-push` status check  |
+| `allow_skip_env`   | `SKEEPER_SKIP` | Environment variable name that triggers the audited bypass |
 
 `pre_push_timeout` accepts any `time.ParseDuration` value (`s`, `m`, `h`). `allow_skip_env` must be a valid environment variable name (uppercase letters, digits, `_`; cannot start with a digit).
 
@@ -103,12 +103,12 @@ By default, every namespace honors:
 
 These files are written under `.git/skeeper/` and are never committed:
 
-| File               | Purpose                                                     | Cleared by                                              |
-| ------------------ | ----------------------------------------------------------- | ------------------------------------------------------- |
-| `transaction.json` | Resumable mutating operation and phase                      | successful `skeeper sync` or `skeeper repair abort`     |
-| `bypass.json`      | Latest audited strict-hook bypass                           | next successful `skeeper sync`                          |
-| `hydration.json`   | Locked sidecar blobs used for merge-aware hydrate/reconcile | refreshed by `skeeper hydrate` and reconciliation flows |
-| `rescue/<id>/`     | Files moved aside before prune or overwrite operations      | manually with `skeeper rescue restore` or local cleanup |
+| File               | Purpose                                             | Cleared by                                              |
+| ------------------ | --------------------------------------------------- | ------------------------------------------------------- |
+| `transaction.json` | Resumable mutating operation and phase              | successful `skeeper sync` or safe `skeeper repair`      |
+| `bypass.json`      | Latest audited strict-hook bypass                   | next successful `skeeper sync` or `skeeper repair`      |
+| `hydration.json`   | Locked sidecar blobs used for merge-aware restores  | refreshed by `skeeper pull`, `restore`, and `sync`      |
+| `rescue/<id>/`     | Files moved aside before prune or overwrite actions | reported by `skeeper repair`; restored manually if used |
 
 ## Validation summary
 

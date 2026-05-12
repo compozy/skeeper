@@ -60,6 +60,7 @@ type InitOptions struct {
 	NamespaceSet bool
 	Bootstrap    string
 	Patterns     []string
+	Track        []string
 }
 
 // InitDefaults reports the values init should present before user overrides.
@@ -88,6 +89,7 @@ type SyncOptions struct {
 	Hook    bool
 	Staged  bool
 	Force   bool
+	Mirror  bool
 	// Pull is accepted for older call sites; strict sync always fetches/rebases.
 	Pull bool
 }
@@ -100,6 +102,29 @@ type SyncResult struct {
 	Namespaces   []NamespaceSyncResult `json:"namespaces"`
 	LockPath     string                `json:"lock_path,omitempty"`
 	DryRun       bool                  `json:"dry_run,omitempty"`
+}
+
+// PullOptions configures a Git-like sidecar pull.
+type PullOptions struct {
+	JSON  bool
+	NoGit bool
+}
+
+// PullResult reports a completed sidecar pull.
+type PullResult struct {
+	OK          bool                   `json:"ok"`
+	GitUpdated  bool                   `json:"git_updated"`
+	LockUpdated bool                   `json:"lock_updated"`
+	Hydrate     HydrateResult          `json:"hydrate"`
+	Diagnostics []reconcile.Diagnostic `json:"diagnostics,omitempty"`
+}
+
+// SyncWorkflowResult reports the high-level pull + push workflow.
+type SyncWorkflowResult struct {
+	OK     bool       `json:"ok"`
+	Pull   PullResult `json:"pull"`
+	Push   SyncResult `json:"push"`
+	DryRun bool       `json:"dry_run,omitempty"`
 }
 
 // NamespaceSyncResult reports one namespace sync outcome.
@@ -156,12 +181,22 @@ type FSCKResult struct {
 type Status struct {
 	Sidecar     string                 `json:"sidecar"`
 	Branch      string                 `json:"branch"`
+	OK          bool                   `json:"ok"`
 	LockPresent bool                   `json:"lock_present"`
 	LockCommit  string                 `json:"lock_commit,omitempty"`
 	Namespaces  []NamespaceStatus      `json:"namespaces"`
 	Transaction *state.Transaction     `json:"transaction,omitempty"`
 	Bypass      *state.Bypass          `json:"bypass,omitempty"`
+	HooksOK     bool                   `json:"hooks_ok"`
+	Hooks       hooks.CheckResult      `json:"hooks"`
+	NextAction  string                 `json:"next_action"`
 	Diagnostics []reconcile.Diagnostic `json:"diagnostics,omitempty"`
+}
+
+// StatusOptions configures status output and check behavior.
+type StatusOptions struct {
+	Check bool
+	Paths bool
 }
 
 // NamespaceStatus describes one namespace's sidecar state.
@@ -180,6 +215,24 @@ type NamespaceStatus struct {
 	LockRemoteState string                   `json:"lock_remote_state,omitempty"`
 	CloneState      string                   `json:"clone_state,omitempty"`
 	Diff            reconcile.ClassCount     `json:"diff"`
+	Paths           []reconcile.PathDiff     `json:"paths,omitempty"`
+}
+
+// RestoreOptions configures local file restoration from the locked sidecar state.
+type RestoreOptions struct {
+	DryRun bool
+	All    bool
+	Paths  []string
+}
+
+// RestoreResult reports files restored from the locked sidecar state.
+type RestoreResult struct {
+	OK          bool                   `json:"ok"`
+	Restored    []string               `json:"restored"`
+	Skipped     []string               `json:"skipped,omitempty"`
+	Rescue      *state.RescueManifest  `json:"rescue,omitempty"`
+	DryRun      bool                   `json:"dry_run,omitempty"`
+	Diagnostics []reconcile.Diagnostic `json:"diagnostics,omitempty"`
 }
 
 // LogOptions configures sidecar history output.
@@ -231,6 +284,27 @@ type MutateResult struct {
 	DryRun  bool                       `json:"dry_run,omitempty"`
 }
 
+// TrackOptions configures public coverage tracking.
+type TrackOptions struct {
+	Namespace string
+	Exclude   []string
+	Sync      bool
+	DryRun    bool
+	JSON      bool
+	Force     bool
+	Commit    bool
+	Message   string
+}
+
+// TrackResult reports a public tracking change.
+type TrackResult struct {
+	ConfigPath string         `json:"config_path"`
+	Gitignore  string         `json:"gitignore"`
+	Plan       reconcile.Plan `json:"plan"`
+	DryRun     bool           `json:"dry_run,omitempty"`
+	Synced     bool           `json:"synced,omitempty"`
+}
+
 // PatternTestOptions configures pattern test.
 type PatternTestOptions struct {
 	Namespace string
@@ -270,6 +344,31 @@ type RepairStatus struct {
 	Bypass      *state.Bypass      `json:"bypass,omitempty"`
 }
 
+// RepairOptions configures the public repair workflow.
+type RepairOptions struct {
+	Check bool
+	JSON  bool
+}
+
+// RepairAction describes one repair step that was taken or recommended.
+type RepairAction struct {
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+}
+
+// RepairResult reports health checks, safe repairs, and remaining issues.
+type RepairResult struct {
+	OK          bool                   `json:"ok"`
+	Check       bool                   `json:"check,omitempty"`
+	Status      Status                 `json:"status"`
+	Verify      VerifyResult           `json:"verify"`
+	FSCK        FSCKResult             `json:"fsck"`
+	Hooks       hooks.CheckResult      `json:"hooks"`
+	Rescues     []state.RescueManifest `json:"rescues,omitempty"`
+	Actions     []RepairAction         `json:"actions,omitempty"`
+	Diagnostics []reconcile.Diagnostic `json:"diagnostics,omitempty"`
+}
+
 // InitDefaults returns deterministic defaults for the project at dir.
 func (s *Service) InitDefaults(ctx context.Context, dir string) (InitDefaults, error) {
 	root, err := s.git.Root(ctx, dir)
@@ -303,7 +402,7 @@ func (s *Service) Init(ctx context.Context, dir string, opts InitOptions) (InitR
 	if visibility == "" {
 		visibility = "private"
 	}
-	patterns, err := config.NormalizePatterns(opts.Patterns)
+	patterns, err := config.NormalizePatterns(append(append([]string{}, opts.Patterns...), opts.Track...))
 	if err != nil {
 		return InitResult{}, err
 	}
@@ -369,6 +468,123 @@ func (s *Service) Hydrate(ctx context.Context, dir string, options ...HydrateOpt
 	return s.hydrate(ctx, dir, opts)
 }
 
+// Restore restores explicit paths from the locked sidecar state.
+func (s *Service) Restore(ctx context.Context, dir string, opts RestoreOptions) (RestoreResult, error) {
+	if err := validateRestoreOptions(opts); err != nil {
+		return RestoreResult{}, err
+	}
+	diff, err := s.diffProject(ctx, dir, "", true)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+	result := RestoreResult{OK: true, DryRun: opts.DryRun}
+	plan, err := buildRestorePlan(&diff, opts, &result)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+	if !result.OK {
+		return result, nil
+	}
+	for _, write := range plan.writes {
+		result.Restored = append(result.Restored, write.path)
+	}
+	sort.Strings(result.Restored)
+	sort.Strings(result.Skipped)
+	if opts.DryRun {
+		return result, nil
+	}
+	if err := applyRestorePlan(ctx, &diff, plan, &result); err != nil {
+		return RestoreResult{}, err
+	}
+	if err := s.writeHydrationJournal(ctx, &diff); err != nil {
+		return RestoreResult{}, err
+	}
+	return result, nil
+}
+
+type restorePlan struct {
+	writes     []restoreWrite
+	candidates []state.RescueCandidate
+}
+
+type restoreWrite struct {
+	path    string
+	content string
+}
+
+func validateRestoreOptions(opts RestoreOptions) error {
+	if opts.All && len(opts.Paths) > 0 {
+		return fmt.Errorf("--all cannot be combined with explicit paths")
+	}
+	if !opts.All && len(opts.Paths) == 0 {
+		return fmt.Errorf("restore requires at least one path or --all")
+	}
+	return nil
+}
+
+func buildRestorePlan(diff *projectDiff, opts RestoreOptions, result *RestoreResult) (restorePlan, error) {
+	targets, err := restoreTargets(diff, opts)
+	if err != nil {
+		return restorePlan{}, err
+	}
+	plan := restorePlan{writes: make([]restoreWrite, 0, len(targets))}
+	for _, rel := range targets {
+		appendRestoreTarget(diff, rel, result, &plan)
+	}
+	return plan, nil
+}
+
+func appendRestoreTarget(diff *projectDiff, rel string, result *RestoreResult, plan *restorePlan) {
+	pathDiff, namespace, ok := findPathDiff(diff.summary, rel)
+	if !ok {
+		result.OK = false
+		result.Diagnostics = append(result.Diagnostics, diagnostic(
+			"restore.path_unmanaged",
+			fmt.Sprintf("%s is not tracked in the locked sidecar state", rel),
+			"",
+			"skeeper status --paths",
+		))
+		return
+	}
+	locked, hasLocked := diff.locked[namespace][rel]
+	if !hasLocked {
+		result.OK = false
+		result.Diagnostics = append(result.Diagnostics, diagnostic(
+			"restore.path_not_locked",
+			fmt.Sprintf("%s has no locked sidecar content to restore", rel),
+			namespace,
+			"skeeper sync",
+		))
+		return
+	}
+	if pathDiff.Class == reconcile.PathUnchanged {
+		result.Skipped = append(result.Skipped, rel)
+		return
+	}
+	if pathDiff.Local != nil {
+		plan.candidates = append(plan.candidates, state.RescueCandidate{Path: rel, Class: string(pathDiff.Class)})
+	}
+	plan.writes = append(plan.writes, restoreWrite{path: rel, content: locked.Content})
+}
+
+func applyRestorePlan(ctx context.Context, diff *projectDiff, plan restorePlan, result *RestoreResult) error {
+	if len(plan.candidates) > 0 {
+		rescue, err := diff.store.CreateRescue(ctx, diff.root, "restore", plan.candidates)
+		if err != nil {
+			return err
+		}
+		if len(rescue.Files) > 0 {
+			result.Rescue = &rescue
+		}
+	}
+	for _, write := range plan.writes {
+		if err := writeStringFile(filepath.Join(diff.root, filepath.FromSlash(write.path)), write.content); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // HydrateResult reports files restored by hydrate.
 type HydrateResult struct {
 	OK             bool                   `json:"ok"`
@@ -385,6 +601,137 @@ type HydrateResult struct {
 
 // Sync mirrors main-tree spec files into the sidecar, pushes, writes, and stages skeeper.lock.
 func (s *Service) Sync(ctx context.Context, dir string, opts SyncOptions) (SyncResult, error) {
+	return s.Push(ctx, dir, opts)
+}
+
+// Pull fetches sidecar refs, materializes remote-only managed files, and preserves local drift.
+func (s *Service) Pull(ctx context.Context, dir string, opts PullOptions) (PullResult, error) {
+	root, cfg, _, err := s.loadProject(ctx, dir)
+	if err != nil {
+		return PullResult{}, err
+	}
+	result := PullResult{OK: true}
+	if !opts.NoGit {
+		updated, err := s.fastForwardMain(ctx, root)
+		if err != nil {
+			return PullResult{}, err
+		}
+		result.GitUpdated = updated
+	}
+	lock, err := s.locks.Load(reconcile.RepoRoot(root))
+	if err != nil {
+		return PullResult{}, err
+	}
+	targetLock, changed, err := s.remoteTipLock(ctx, root, cfg, lock)
+	if err != nil {
+		return PullResult{}, err
+	}
+	hydrate, err := s.hydrateWithLock(ctx, root, HydrateOptions{KeepLocal: true}, &targetLock)
+	if err != nil {
+		return PullResult{}, err
+	}
+	result.Hydrate = hydrate
+	result.LockUpdated = changed
+	result.OK = hydrate.OK || pullHasOnlyLocalDrift(pullFinalSummary(hydrate))
+	if !result.OK {
+		result.Diagnostics = append(result.Diagnostics, hydrate.Diagnostics...)
+	}
+	return result, nil
+}
+
+// SyncWorkflow runs the Git-like default workflow: pull remote specs, then push local specs.
+func (s *Service) SyncWorkflow(ctx context.Context, dir string, opts SyncOptions) (SyncWorkflowResult, error) {
+	if opts.DryRun {
+		push, err := s.Push(ctx, dir, opts)
+		if err != nil {
+			return SyncWorkflowResult{}, err
+		}
+		return SyncWorkflowResult{OK: true, Push: push, DryRun: true}, nil
+	}
+	pull, err := s.Pull(ctx, dir, PullOptions{NoGit: true})
+	if err != nil {
+		return SyncWorkflowResult{}, err
+	}
+	result := SyncWorkflowResult{OK: pull.OK, Pull: pull}
+	if !pull.OK {
+		return result, nil
+	}
+	push, err := s.Push(ctx, dir, opts)
+	if err != nil {
+		return SyncWorkflowResult{}, err
+	}
+	result.Push = push
+	result.OK = true
+	return result, nil
+}
+
+func (s *Service) remoteTipLock(
+	ctx context.Context,
+	root string,
+	cfg config.Config,
+	lock lockfile.Lock,
+) (lockfile.Lock, bool, error) {
+	if err := s.ensureClone(ctx, root, cfg.Sidecar); err != nil {
+		return lockfile.Lock{}, false, err
+	}
+	sidecarDir := sidecarPath(root)
+	if _, err := s.runner.Run(ctx, sidecarDir, "git", "fetch", "origin"); err != nil {
+		return lockfile.Lock{}, false, fmt.Errorf("fetch sidecar origin: %w", err)
+	}
+	next := lockfile.Normalize(lock)
+	changed := false
+	for i, record := range next.Namespaces {
+		remoteRef := "refs/remotes/origin/" + record.SidecarBranch
+		if !s.git.RefExists(ctx, sidecarDir, remoteRef) {
+			continue
+		}
+		remoteTip, err := s.revParse(ctx, sidecarDir, remoteRef)
+		if err != nil {
+			return lockfile.Lock{}, false, err
+		}
+		if remoteTip == record.Commit {
+			continue
+		}
+		namespace, err := namespaceByName(cfg, record.Name)
+		if err != nil {
+			return lockfile.Lock{}, false, err
+		}
+		digest, err := s.locks.DigestResult(ctx, sidecarDir, namespace, reconcile.SidecarRef(remoteRef))
+		if err != nil {
+			return lockfile.Lock{}, false, err
+		}
+		next.Namespaces[i].Commit = remoteTip
+		next.Namespaces[i].Digest = digest.Digest
+		next.Namespaces[i].Files = digest.Files
+		next.Namespaces[i].Bytes = digest.Bytes
+		changed = true
+	}
+	return next, changed, nil
+}
+
+func pullHasOnlyLocalDrift(summary reconcile.DiffSummary) bool {
+	for _, namespace := range summary.Namespaces {
+		counts := namespace.Counts
+		if counts.MissingLocal != 0 ||
+			counts.SidecarModified != 0 ||
+			counts.BothModifiedConflict != 0 ||
+			counts.NamespaceRemoved != 0 ||
+			counts.ConfigUnowned != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func pullFinalSummary(hydrate HydrateResult) reconcile.DiffSummary {
+	if hydrate.FSCKAfter == nil {
+		return hydrate.Plan
+	}
+	return reconcile.SummarizeDiff(hydrate.FSCKAfter.Namespaces)
+}
+
+// Push mirrors local managed files into the sidecar without pruning remote-only files by default.
+func (s *Service) Push(ctx context.Context, dir string, opts SyncOptions) (SyncResult, error) {
 	root, _, store, err := s.loadProject(ctx, dir)
 	if err != nil {
 		return SyncResult{}, err
@@ -412,7 +759,7 @@ func (s *Service) Sync(ctx context.Context, dir string, opts SyncOptions) (SyncR
 	if err != nil {
 		return SyncResult{}, err
 	}
-	result, syncErr := s.applySyncPlan(ctx, plan)
+	result, syncErr := s.applySyncPlan(ctx, plan, opts.Mirror)
 	if syncErr != nil {
 		return SyncResult{}, syncErr
 	}
@@ -655,15 +1002,19 @@ func (s *Service) FSCK(ctx context.Context, dir string, opts FSCKOptions) (FSCKR
 				"fsck.working_tree_drift",
 				fmt.Sprintf("namespace %s working tree differs from locked sidecar content", namespace.Name),
 				namespace.Name,
-				"skeeper reconcile",
+				"skeeper status --paths",
 			))
 		}
 	}
 	return result, nil
 }
 
-// Status returns a summary suitable for CLI display.
-func (s *Service) Status(ctx context.Context, dir string) (Status, error) {
+// Status returns a remote-aware summary suitable for CLI display and CI checks.
+func (s *Service) Status(ctx context.Context, dir string, options ...StatusOptions) (Status, error) {
+	opts := StatusOptions{}
+	if len(options) > 0 {
+		opts = options[0]
+	}
 	root, cfg, store, err := s.loadProject(ctx, dir)
 	if err != nil {
 		return Status{}, err
@@ -676,7 +1027,7 @@ func (s *Service) Status(ctx context.Context, dir string) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	status := Status{Sidecar: cfg.Sidecar, Branch: branch}
+	status := Status{Sidecar: cfg.Sidecar, Branch: branch, OK: true, HooksOK: true}
 	if err := s.loadStatusState(ctx, store, &status); err != nil {
 		return Status{}, err
 	}
@@ -684,14 +1035,57 @@ func (s *Service) Status(ctx context.Context, dir string) (Status, error) {
 	if lockErr == nil {
 		status.LockPresent = true
 		status.LockCommit = lockCommitSummary(lock)
+	} else {
+		status.OK = false
+		status.Diagnostics = append(status.Diagnostics, diagnostic(
+			"lock.missing",
+			fmt.Sprintf("%s is missing or invalid; run `skeeper sync`", lockfile.Filename),
+			"",
+			"skeeper sync",
+		))
 	}
 	diff := s.statusDiff(ctx, root, status.LockPresent)
+	if !diff.OK && status.LockPresent {
+		status.OK = false
+		status.Diagnostics = append(status.Diagnostics, diagnostic(
+			"status.working_tree_drift",
+			"working-tree specs differ from the locked sidecar state",
+			"",
+			"skeeper sync",
+		))
+	}
 	for _, namespace := range plan.Namespaces {
 		status.Namespaces = append(
 			status.Namespaces,
-			s.namespaceStatus(ctx, root, namespace, lock, status.LockPresent, diff),
+			s.namespaceStatus(ctx, root, namespace, lock, status.LockPresent, diff, opts),
 		)
 	}
+	hookCheck, err := s.hooks.Check(ctx, reconcile.RepoRoot(root))
+	if err != nil {
+		status.OK = false
+		status.HooksOK = false
+		status.Diagnostics = append(status.Diagnostics, diagnostic(
+			"hooks.check_failed",
+			err.Error(),
+			"",
+			"skeeper repair",
+		))
+	} else {
+		status.Hooks = hookCheck
+		status.HooksOK = hookCheck.OK
+		if !hookCheck.OK {
+			status.OK = false
+			for _, message := range hookCheck.Diagnostics {
+				status.Diagnostics = append(status.Diagnostics, diagnostic(
+					"hooks.unhealthy",
+					message,
+					"",
+					"skeeper repair",
+				))
+			}
+		}
+	}
+	status.NextAction = statusNextAction(status)
 	return status, nil
 }
 
@@ -700,11 +1094,17 @@ func (s *Service) loadStatusState(ctx context.Context, store *state.Store, statu
 		return err
 	} else if ok {
 		status.Transaction = &tx
+		status.OK = false
+		status.Diagnostics = append(
+			status.Diagnostics,
+			diagnostic("repair.transaction_active", "repair transaction is active", "", "skeeper repair"),
+		)
 	}
 	if bypass, ok, err := store.Bypass(ctx); err != nil {
 		return err
 	} else if ok {
 		status.Bypass = &bypass
+		status.OK = false
 		status.Diagnostics = append(
 			status.Diagnostics,
 			diagnostic("bypass.active", "strict hook bypass is active; run `skeeper sync`", "", "skeeper sync"),
@@ -717,7 +1117,7 @@ func (s *Service) statusDiff(ctx context.Context, root string, lockPresent bool)
 	if !lockPresent {
 		return reconcile.DiffSummary{}
 	}
-	diff, err := s.diffProject(ctx, root, "", false)
+	diff, err := s.diffProject(ctx, root, "", true)
 	if err != nil {
 		return reconcile.DiffSummary{}
 	}
@@ -731,6 +1131,7 @@ func (s *Service) namespaceStatus(
 	lock lockfile.Lock,
 	lockPresent bool,
 	diff reconcile.DiffSummary,
+	opts StatusOptions,
 ) NamespaceStatus {
 	status := NamespaceStatus{
 		Name:         string(namespace.Name),
@@ -738,6 +1139,9 @@ func (s *Service) namespaceStatus(
 		TrackedFiles: len(namespace.Files),
 		Remote:       "not checked",
 		Diff:         namespaceDiffCounts(diff, string(namespace.Name)),
+	}
+	if opts.Paths {
+		status.Paths = namespaceDiffPaths(diff, string(namespace.Name))
 	}
 	if lockPresent {
 		s.applyLockedStatus(ctx, root, lock, &status)
@@ -799,6 +1203,46 @@ func namespaceDiffCounts(summary reconcile.DiffSummary, name string) reconcile.C
 		}
 	}
 	return reconcile.ClassCount{}
+}
+
+func namespaceDiffPaths(summary reconcile.DiffSummary, name string) []reconcile.PathDiff {
+	for _, namespace := range summary.Namespaces {
+		if namespace.Name == name {
+			return append([]reconcile.PathDiff(nil), namespace.Paths...)
+		}
+	}
+	return nil
+}
+
+func statusNextAction(status Status) string {
+	if status.Transaction != nil {
+		return "Run `skeeper repair` to finish local recovery."
+	}
+	if status.Bypass != nil {
+		return "Run `skeeper sync` to clear the strict hook bypass."
+	}
+	if !status.LockPresent {
+		return "Run `skeeper sync` to create the sidecar lock."
+	}
+	for _, namespace := range status.Namespaces {
+		counts := namespace.Diff
+		if counts.BothModifiedConflict != 0 || counts.NamespaceRemoved != 0 || counts.ConfigUnowned != 0 {
+			return "Run `skeeper repair` to inspect unresolved managed-file drift."
+		}
+		if counts.MissingLocal != 0 || counts.SidecarModified != 0 {
+			return "Run `skeeper pull` to apply remote sidecar docs."
+		}
+		if counts.LocalOnly != 0 || counts.LocalModified != 0 {
+			return "Run `skeeper sync` to publish local docs and converge with the sidecar."
+		}
+	}
+	if !status.HooksOK {
+		return "Run `skeeper repair` to refresh Git integration."
+	}
+	if !status.OK {
+		return "Run `skeeper repair` to inspect Skeeper health."
+	}
+	return "Working tree is clean and up to date."
 }
 
 // Log returns sidecar history for a mirrored file path.
@@ -1020,6 +1464,30 @@ func (s *Service) PatternAdd(ctx context.Context, dir, glob string, opts Pattern
 	return result, nil
 }
 
+// Track adds a public managed glob and optionally syncs matching existing files.
+func (s *Service) Track(ctx context.Context, dir, glob string, opts TrackOptions) (TrackResult, error) {
+	result, err := s.PatternAdd(ctx, dir, glob, PatternAddOptions{
+		Namespace:     opts.Namespace,
+		Exclude:       opts.Exclude,
+		AdoptExisting: opts.Sync,
+		DryRun:        opts.DryRun,
+		JSON:          opts.JSON,
+		Force:         opts.Force,
+		Commit:        opts.Commit,
+		Message:       opts.Message,
+	})
+	if err != nil {
+		return TrackResult{}, err
+	}
+	return TrackResult{
+		ConfigPath: result.ConfigPath,
+		Gitignore:  result.Gitignore,
+		Plan:       result.Plan,
+		DryRun:     result.DryRun,
+		Synced:     opts.Sync && !opts.DryRun,
+	}, nil
+}
+
 // HooksInstall installs managed hooks.
 func (s *Service) HooksInstall(ctx context.Context, dir string) (hooks.InstallResult, error) {
 	root, cfg, _, err := s.loadProject(ctx, dir)
@@ -1132,7 +1600,7 @@ func (s *Service) RepairResume(ctx context.Context, dir string) (SyncResult, err
 	if !sameStrings(namespaceNames(plan.Namespaces), tx.Namespaces) ||
 		!sameStrings(planFilePaths(plan), tx.Targets) {
 		return SyncResult{}, fmt.Errorf(
-			"config no longer matches recorded transaction %s; run `skeeper repair abort` and sync again",
+			"config no longer matches recorded transaction %s; run `skeeper repair` and sync again",
 			tx.ID,
 		)
 	}
@@ -1174,6 +1642,136 @@ func (s *Service) RecordBypass(ctx context.Context, dir, reason string) error {
 		MainSHA: sha,
 		Reason:  reason,
 	})
+}
+
+// Repair is the single public recovery entry point for local Skeeper state.
+func (s *Service) Repair(ctx context.Context, dir string, opts RepairOptions) (RepairResult, error) {
+	root, _, store, err := s.loadProject(ctx, dir)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	result, err := s.repairSnapshot(ctx, root, opts)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	if opts.Check {
+		result.Check = true
+		return result, nil
+	}
+	changed, err := s.applyRepairActions(ctx, root, store, &result)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	if !changed {
+		return result, nil
+	}
+	actions := append([]RepairAction(nil), result.Actions...)
+	result, err = s.repairSnapshot(ctx, root, opts)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	result.Actions = append(actions, result.Actions...)
+	return result, nil
+}
+
+func (s *Service) applyRepairActions(
+	ctx context.Context,
+	root string,
+	store *state.Store,
+	result *RepairResult,
+) (bool, error) {
+	changed := false
+	if result.Status.Transaction != nil && !result.Status.Transaction.MainIndexMutated {
+		if _, err := s.RepairResume(ctx, root); err != nil {
+			recordRepairFailure(result, "repair.resume_failed", err, "skeeper repair --check")
+			return false, nil
+		}
+		result.Actions = append(result.Actions, RepairAction{
+			Kind:    "transaction_resumed",
+			Message: "resumed the active transaction with a fresh sync",
+		})
+		changed = true
+	}
+	if result.Status.Bypass != nil {
+		if _, err := s.SyncWorkflow(ctx, root, SyncOptions{Force: true}); err != nil {
+			recordRepairFailure(result, "repair.bypass_sync_failed", err, "skeeper sync")
+			return false, nil
+		}
+		result.Actions = append(result.Actions, RepairAction{
+			Kind:    "bypass_synced",
+			Message: "ran sync to repair a strict-hook bypass",
+		})
+		changed = true
+	}
+	if !result.Hooks.OK {
+		if _, err := s.HooksInstall(ctx, root); err != nil {
+			recordRepairFailure(result, "repair.hooks_install_failed", err, "skeeper init")
+			return false, nil
+		}
+		result.Actions = append(result.Actions, RepairAction{
+			Kind:    "hooks_refreshed",
+			Message: "refreshed managed Git hooks and merge-driver configuration",
+		})
+		changed = true
+	}
+	if result.Status.Bypass != nil && result.Verify.OK && result.FSCK.OK {
+		if err := store.ClearBypass(ctx); err != nil {
+			return false, err
+		}
+		result.Actions = append(result.Actions, RepairAction{
+			Kind:    "bypass_cleared",
+			Message: "cleared stale strict-hook bypass state after successful validation",
+		})
+		changed = true
+	}
+	return changed, nil
+}
+
+func recordRepairFailure(result *RepairResult, code string, err error, recovery string) {
+	result.OK = false
+	result.Diagnostics = append(result.Diagnostics, diagnostic(code, err.Error(), "", recovery))
+}
+
+func (s *Service) repairSnapshot(ctx context.Context, root string, opts RepairOptions) (RepairResult, error) {
+	status, err := s.Status(ctx, root, StatusOptions{Check: opts.Check, Paths: true})
+	if err != nil {
+		return RepairResult{}, err
+	}
+	result := RepairResult{OK: status.OK, Check: opts.Check, Status: status, Hooks: status.Hooks}
+	result.Diagnostics = append(result.Diagnostics, status.Diagnostics...)
+	if status.LockPresent {
+		verify, err := s.Verify(ctx, root, VerifyOptions{})
+		if err != nil {
+			return RepairResult{}, err
+		}
+		result.Verify = verify
+		if !verify.OK {
+			result.OK = false
+			result.Diagnostics = append(result.Diagnostics, verify.Diagnostics...)
+		}
+		fsck, err := s.FSCK(ctx, root, FSCKOptions{})
+		if err != nil {
+			return RepairResult{}, err
+		}
+		result.FSCK = fsck
+		if !fsck.OK {
+			result.OK = false
+			result.Diagnostics = append(result.Diagnostics, fsck.Diagnostics...)
+		}
+	}
+	_, _, store, err := s.loadProject(ctx, root)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	rescues, err := store.ListRescues(ctx)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	result.Rescues = rescues
+	if status.Transaction != nil || status.Bypass != nil || !status.HooksOK {
+		result.OK = false
+	}
+	return result, nil
 }
 
 func mergeDriverOutputPath(root, currentPath string) (string, error) {
@@ -1265,14 +1863,14 @@ func loadLockFromPath(root, path string) (lockfile.Lock, error) {
 	return lockfile.Normalize(lock), nil
 }
 
-func (s *Service) applySyncPlan(ctx context.Context, plan reconcile.Plan) (SyncResult, error) {
+func (s *Service) applySyncPlan(ctx context.Context, plan reconcile.Plan, mirror bool) (SyncResult, error) {
 	root := string(plan.Root)
 	if err := s.ensureClone(ctx, root, plan.Config.Sidecar); err != nil {
 		return SyncResult{}, err
 	}
 	result := SyncResult{}
 	for _, namespace := range plan.Namespaces {
-		nsResult, err := s.applyNamespacePlan(ctx, plan, namespace)
+		nsResult, err := s.applyNamespacePlan(ctx, plan, namespace, mirror)
 		if err != nil {
 			return SyncResult{}, err
 		}
@@ -1292,6 +1890,7 @@ func (s *Service) applyNamespacePlan(
 	ctx context.Context,
 	plan reconcile.Plan,
 	namespace reconcile.NamespacePlan,
+	mirror bool,
 ) (NamespaceSyncResult, error) {
 	root := string(plan.Root)
 	sidecarDir := sidecarPath(root)
@@ -1306,7 +1905,13 @@ func (s *Service) applyNamespacePlan(
 	if err != nil {
 		return NamespaceSyncResult{}, err
 	}
-	if err := mirrorFiles(root, sidecarStoragePath(root, string(namespace.Name)), namespace, sidecarFiles); err != nil {
+	if err := mirrorFiles(
+		root,
+		sidecarStoragePath(root, string(namespace.Name)),
+		namespace,
+		sidecarFiles,
+		mirror,
+	); err != nil {
 		return NamespaceSyncResult{}, fmt.Errorf("mirror namespace %q: %w", namespace.Name, err)
 	}
 	preCommitDigest, err := lockfile.DigestWorkingTree(root, filePlanPaths(namespace.Files), namespace.StagedContent)
@@ -1325,7 +1930,7 @@ func (s *Service) applyNamespacePlan(
 	if err != nil {
 		return NamespaceSyncResult{}, err
 	}
-	if digest != preCommitDigest {
+	if mirror && digest != preCommitDigest {
 		return NamespaceSyncResult{}, fmt.Errorf(
 			"digest.parity_mismatch: namespace %s staged digest %s (%d files, %d bytes) "+
 				"does not match sidecar digest %s (%d files, %d bytes)",
@@ -1604,7 +2209,7 @@ func (s *Service) ensureBranch(ctx context.Context, sidecarDir, branch string) e
 		return err
 	} else if dirty {
 		return fmt.Errorf(
-			"%s has local changes; run `skeeper repair status` before switching sidecar branches",
+			"%s has local changes; run `skeeper repair --check` before switching sidecar branches",
 			DirName,
 		)
 	}
@@ -1753,7 +2358,7 @@ func (s *Service) remoteState(ctx context.Context, sidecarDir, branch string) st
 
 func (s *Service) ensureCommit(ctx context.Context, sidecarDir, commit string) error {
 	if _, err := s.runner.Run(ctx, sidecarDir, "git", "cat-file", "-e", commit+"^{commit}"); err != nil {
-		return fmt.Errorf("sidecar commit %s is missing; run `skeeper sync`: %w", commit, err)
+		return fmt.Errorf("sidecar commit %s is missing; run `skeeper pull`: %w", commit, err)
 	}
 	return nil
 }
@@ -1777,7 +2382,13 @@ func (s *Service) commitMain(ctx context.Context, root, message string) (string,
 	return s.revParse(ctx, root, "HEAD")
 }
 
-func mirrorFiles(root, sidecarDir string, namespace reconcile.NamespacePlan, sidecarFiles []string) error {
+func mirrorFiles(
+	root string,
+	sidecarDir string,
+	namespace reconcile.NamespacePlan,
+	sidecarFiles []string,
+	mirror bool,
+) error {
 	mainSet := make(map[string]struct{}, len(namespace.Files))
 	for _, file := range namespace.Files {
 		mainSet[file.Path] = struct{}{}
@@ -1792,12 +2403,15 @@ func mirrorFiles(root, sidecarDir string, namespace reconcile.NamespacePlan, sid
 			return err
 		}
 	}
-	for _, file := range sidecarFiles {
-		if _, ok := mainSet[file]; ok {
-			continue
-		}
-		if err := os.Remove(filepath.Join(sidecarDir, filepath.FromSlash(file))); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove sidecar file %s: %w", file, err)
+	if mirror {
+		for _, file := range sidecarFiles {
+			if _, ok := mainSet[file]; ok {
+				continue
+			}
+			path := filepath.Join(sidecarDir, filepath.FromSlash(file))
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove sidecar file %s: %w", file, err)
+			}
 		}
 	}
 	return nil
@@ -1884,7 +2498,7 @@ func validateExistingConfig(cfg config.Config, opts InitOptions) error {
 	if bootstrap != "" && bootstrap != cfg.Bootstrap {
 		return fmt.Errorf("%s already exists with incompatible bootstrap", config.Filename)
 	}
-	patterns, err := config.NormalizePatterns(opts.Patterns)
+	patterns, err := config.NormalizePatterns(append(append([]string{}, opts.Patterns...), opts.Track...))
 	if err != nil {
 		return err
 	}
@@ -2103,6 +2717,42 @@ func planNamespace(plan reconcile.Plan, name string) (reconcile.NamespacePlan, b
 		}
 	}
 	return reconcile.NamespacePlan{}, false
+}
+
+func restoreTargets(diff *projectDiff, opts RestoreOptions) ([]string, error) {
+	seen := map[string]struct{}{}
+	if opts.All {
+		for _, files := range diff.locked {
+			for path := range files {
+				seen[path] = struct{}{}
+			}
+		}
+	} else {
+		for _, raw := range opts.Paths {
+			rel, err := resolveProjectPath(diff.root, raw)
+			if err != nil {
+				return nil, err
+			}
+			seen[rel] = struct{}{}
+		}
+	}
+	targets := make([]string, 0, len(seen))
+	for path := range seen {
+		targets = append(targets, path)
+	}
+	sort.Strings(targets)
+	return targets, nil
+}
+
+func findPathDiff(summary reconcile.DiffSummary, rel string) (reconcile.PathDiff, string, bool) {
+	for _, namespace := range summary.Namespaces {
+		for _, path := range namespace.Paths {
+			if path.Path == rel {
+				return path, namespace.Name, true
+			}
+		}
+	}
+	return reconcile.PathDiff{}, "", false
 }
 
 func lockRecord(lock lockfile.Lock, name string) (lockfile.NamespaceRecord, bool) {

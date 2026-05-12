@@ -27,9 +27,9 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 	env.assertContainsFile(filepath.Join(project, ".skeeper.yml"), "name: project")
 	env.assertContainsFile(filepath.Join(project, ".gitignore"), ".skeeper/")
 	env.assertContainsFile(filepath.Join(project, ".gitignore"), "**/SPEC.md")
-	env.assertContainsFile(filepath.Join(project, ".git", "hooks", "pre-commit"), "skeeper sync --hook")
-	env.assertContainsFile(filepath.Join(project, ".git", "hooks", "pre-merge-commit"), "skeeper sync --hook")
-	env.assertContainsFile(filepath.Join(project, ".git", "hooks", "pre-push"), "skeeper verify --hook")
+	env.assertContainsFile(filepath.Join(project, ".git", "hooks", "pre-commit"), "skeeper internal pre-commit")
+	env.assertContainsFile(filepath.Join(project, ".git", "hooks", "pre-merge-commit"), "skeeper internal pre-commit")
+	env.assertContainsFile(filepath.Join(project, ".git", "hooks", "pre-push"), "skeeper internal pre-push")
 	env.assertContainsFile(filepath.Join(project, ".gitattributes"), "skeeper.lock merge=skeeper-lock")
 	env.assertContainsFile(env.ghLog, "repo create project-specs --private")
 
@@ -51,7 +51,7 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 	}
 
 	syncOut := env.run(project, "skeeper", "sync")
-	if !strings.Contains(syncOut, "no spec changes") && !strings.Contains(syncOut, "synced 1 specs") {
+	if !strings.Contains(syncOut, "no spec changes") && !strings.Contains(syncOut, "pushed 1 specs") {
 		t.Fatalf("unexpected sync output: %q", syncOut)
 	}
 	env.assertSidecarFile(
@@ -71,10 +71,11 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 
 	fresh := filepath.Join(env.root, "fresh")
 	env.git("", "clone", mainRemote, fresh)
-	env.run(fresh, "skeeper", "hydrate")
+	env.run(fresh, "skeeper", "restore", "--all")
 	env.assertFile(filepath.Join(fresh, "src/auth/SPEC.md"), "# Auth spec\n\nOAuth provider design.\n")
-	env.assertContainsFile(filepath.Join(fresh, ".git", "hooks", "pre-commit"), "skeeper sync --hook")
-	env.assertContainsFile(filepath.Join(fresh, ".git", "hooks", "pre-merge-commit"), "skeeper sync --hook")
+	env.run(fresh, "skeeper", "repair")
+	env.assertContainsFile(filepath.Join(fresh, ".git", "hooks", "pre-commit"), "skeeper internal pre-commit")
+	env.assertContainsFile(filepath.Join(fresh, ".git", "hooks", "pre-merge-commit"), "skeeper internal pre-commit")
 }
 
 func TestSkeeperSharedSidecarNamespaceIsolationAcrossRepos(t *testing.T) {
@@ -124,7 +125,7 @@ func TestSkeeperSharedSidecarNamespaceIsolationAcrossRepos(t *testing.T) {
 	env.writeFile(alpha, "src/auth/service.go", "package auth\n\nconst version = 2\n")
 	env.git(alpha, "add", "src/auth/service.go")
 	env.git(alpha, "commit", "-m", "alpha: remove auth spec")
-	env.run(alpha, "skeeper", "sync")
+	env.run(alpha, "skeeper", "push", "--prune")
 	env.assertSidecarMissingFromRemote(sharedRemote, "alpha/__branches__/main", "alpha/src/auth/SPEC.md")
 	env.assertSidecarFileFromRemote(sharedRemote, "beta/__branches__/main", "beta/src/billing/SPEC.md", "# Beta spec\n")
 
@@ -138,11 +139,11 @@ func TestSkeeperSharedSidecarNamespaceIsolationAcrossRepos(t *testing.T) {
 	if err := os.Remove(filepath.Join(beta, "src/billing/SPEC.md")); err != nil {
 		t.Fatalf("remove beta spec: %v", err)
 	}
-	env.run(beta, "skeeper", "hydrate")
+	env.run(beta, "skeeper", "restore", "--all")
 	env.assertFile(filepath.Join(beta, "src/billing/SPEC.md"), "# Beta spec\n")
 }
 
-func TestSkeeperReconcileRescuesLocalOnlyFilesEndToEnd(t *testing.T) {
+func TestSkeeperRepairReportsLocalOnlyFilesEndToEnd(t *testing.T) {
 	env := newE2EEnv(t)
 	project := env.newMainRepo("project")
 	sidecarRemote := env.newBareRepo("project-specs.git")
@@ -159,22 +160,55 @@ func TestSkeeperReconcileRescuesLocalOnlyFilesEndToEnd(t *testing.T) {
 	env.run(project, "skeeper", "sync")
 
 	env.writeFile(project, "src/local/SPEC.md", "# Local only\n")
-	blocked := env.runExpectFailure(project, "skeeper", "hydrate")
-	env.assertOutputContains(blocked, "hydrate blocked")
-	diffOut := env.run(project, "skeeper", "diff", "--extra")
-	env.assertOutputContains(diffOut, "local_only")
-	env.assertOutputContains(diffOut, "src/local/SPEC.md")
-
-	reconcileOut := env.run(project, "skeeper", "reconcile", "--prune-local")
-	env.assertOutputContains(reconcileOut, "rescue:")
-	if _, err := os.Stat(filepath.Join(project, "src/local/SPEC.md")); !os.IsNotExist(err) {
-		t.Fatalf("expected local-only spec to be moved to rescue, stat err=%v", err)
-	}
-	listOut := env.run(project, "skeeper", "rescue", "list")
-	env.assertOutputContains(listOut, "hydrate")
-	rescueID := strings.Fields(listOut)[0]
-	env.run(project, "skeeper", "rescue", "restore", rescueID, "src/local/SPEC.md")
+	statusOut := env.runExpectFailure(project, "skeeper", "status", "--check", "--paths")
+	env.assertOutputContains(statusOut, "local_only")
+	env.assertOutputContains(statusOut, "src/local/SPEC.md")
+	repairOut := env.runExpectFailure(project, "skeeper", "repair", "--check")
+	env.assertOutputContains(repairOut, "repair needed")
 	env.assertFile(filepath.Join(project, "src/local/SPEC.md"), "# Local only\n")
+}
+
+func TestSkeeperSyncConvergesDisjointDocsAcrossTwoClones(t *testing.T) {
+	env := newE2EEnv(t)
+	mainRemote := env.newBareRepo("project.git")
+	sidecarRemote := env.newBareRepo("project-specs.git")
+	cloneA := env.newMainRepo("project-a")
+	env.git(cloneA, "remote", "add", "origin", mainRemote)
+
+	env.run(cloneA, "skeeper",
+		"init",
+		"--sidecar", sidecarRemote,
+		"--namespace", "project",
+		"--patterns", "docs/**",
+	)
+	env.writeFile(cloneA, "README.md", "# project\n")
+	env.git(cloneA, "add", "README.md", ".skeeper.yml", ".gitignore", ".gitattributes")
+	env.git(cloneA, "commit", "-m", "bootstrap skeeper")
+	env.writeFile(cloneA, "docs/a.md", "# A\n")
+	env.run(cloneA, "skeeper", "push")
+	env.git(cloneA, "add", "skeeper.lock")
+	env.git(cloneA, "commit", "-m", "skeeper: sync A")
+	env.git(cloneA, "push", "-u", "origin", "main")
+
+	cloneB := filepath.Join(env.root, "project-b")
+	env.git("", "clone", mainRemote, cloneB)
+	env.run(cloneB, "skeeper", "restore", "--all")
+	env.writeFile(cloneB, "docs/b.md", "# B\n")
+	env.run(cloneB, "skeeper", "sync")
+	env.git(cloneB, "add", "skeeper.lock")
+	env.git(cloneB, "commit", "-m", "skeeper: sync B")
+	env.git(cloneB, "push", "origin", "main")
+
+	env.writeFile(cloneA, "docs/a2.md", "# A2\n")
+	syncOut := env.run(cloneA, "skeeper", "sync")
+	env.assertOutputContains(syncOut, "pulled 1 spec")
+	env.assertFile(filepath.Join(cloneA, "docs/a.md"), "# A\n")
+	env.assertFile(filepath.Join(cloneA, "docs/a2.md"), "# A2\n")
+	env.assertFile(filepath.Join(cloneA, "docs/b.md"), "# B\n")
+	env.assertSidecarFileFromRemote(sidecarRemote, "project/__branches__/main", "project/docs/a.md", "# A\n")
+	env.assertSidecarFileFromRemote(sidecarRemote, "project/__branches__/main", "project/docs/a2.md", "# A2\n")
+	env.assertSidecarFileFromRemote(sidecarRemote, "project/__branches__/main", "project/docs/b.md", "# B\n")
+	env.run(cloneA, "skeeper", "status", "--check")
 }
 
 func TestSkeeperStrictHookFailureAndBypassRepair(t *testing.T) {
@@ -214,8 +248,8 @@ func TestSkeeperStrictHookFailureAndBypassRepair(t *testing.T) {
 	}
 	statusOut := env.run(project, "skeeper", "status")
 	env.assertOutputContains(statusOut, "bypass:")
-	env.run(project, "skeeper", "repair", "resume")
-	env.run(project, "skeeper", "verify")
+	env.run(project, "skeeper", "repair")
+	env.run(project, "skeeper", "status", "--check")
 	env.assertSidecarFile("project/__branches__/main", "project/src/auth/SPEC.md", "# Bypassed auth spec\n")
 	if _, err := os.Stat(filepath.Join(project, ".git", "skeeper", "bypass.json")); !os.IsNotExist(err) {
 		t.Fatalf("expected bypass journal to be cleared, stat err=%v", err)
@@ -270,7 +304,7 @@ func TestSkeeperMergeDriverResolvesRealGitMerge(t *testing.T) {
 	writeFile(t, driverWrapper, []byte(`#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$MERGE_DRIVER_LOG"
-exec skeeper merge-driver "$@"
+exec skeeper internal merge-driver "$@"
 `), 0o700)
 	t.Setenv("MERGE_DRIVER_LOG", driverLog)
 	env.git(project, "config", "merge.skeeper-lock.driver", driverWrapper+" %O %A %B")
@@ -289,7 +323,7 @@ exec skeeper merge-driver "$@"
 	env.git(project, "switch", "left")
 	env.git(project, "merge", "right")
 	env.assertContainsFile(driverLog, ".merge_file")
-	env.run(project, "skeeper", "verify", "--source-branch", "left")
+	env.run(project, "skeeper", "internal", "pre-push")
 	env.assertContainsFile(filepath.Join(project, "skeeper.lock"), `"source_branch": "left"`)
 	env.assertSidecarFileFromRemote(
 		sidecarRemote,
