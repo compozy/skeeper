@@ -26,5 +26,5 @@
     "lint": "bun run format \u0026\u0026 bunx oxlint --no-error-on-unmatched-pattern '**/*.{ts,tsx,js,jsx,mjs,cjs}'",
     "prepare": "husky"
   },
-  "version": "0.2.1"
+  "version": "0.3.0"
 }
