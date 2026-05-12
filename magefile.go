@@ -114,6 +114,20 @@ func Build() error {
 	return sh.RunV("go", "build", "-trimpath", "-ldflags", buildLDFlags(), "-o", out, "./cmd/skeeper")
 }
 
+// Install installs the application binary into GOBIN/GOPATH/bin with version ldflags.
+func Install() error {
+	installPath, err := goInstallPath()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Installing %s to %s\n", appBinary, installPath)
+	if err := sh.RunV("go", "install", "-trimpath", "-ldflags", buildLDFlags(), "./cmd/skeeper"); err != nil {
+		return fmt.Errorf("install %s: %w", appBinary, err)
+	}
+	fmt.Printf("Installed %s to %s\n", appBinary, installPath)
+	return nil
+}
+
 // Verify runs the blocking gate: fmt -> lint -> test -> build.
 func Verify() {
 	mg.SerialDeps(Fmt, Lint, Test, Build)
@@ -237,6 +251,37 @@ func gitOutput(args ...string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func goInstallPath() (string, error) {
+	gobin, err := goEnv("GOBIN")
+	if err != nil {
+		return "", err
+	}
+	if gobin != "" {
+		return filepath.Join(gobin, appBinary), nil
+	}
+	gopath, err := goEnv("GOPATH")
+	if err != nil {
+		return "", err
+	}
+	if gopath == "" {
+		return "", fmt.Errorf("go env GOPATH returned an empty path")
+	}
+	firstGoPath := filepath.SplitList(gopath)[0]
+	if firstGoPath == "" {
+		return "", fmt.Errorf("go env GOPATH returned an empty first path")
+	}
+	return filepath.Join(firstGoPath, "bin", appBinary), nil
+}
+
+func goEnv(key string) (string, error) {
+	cmd := exec.Command("go", "env", key)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("go env %s: %w", key, err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func runWithEnv(env map[string]string, name string, args ...string) error {

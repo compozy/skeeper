@@ -509,7 +509,7 @@ func (s *Service) sidecarSnapshot(
 	}
 	files := map[string]reconcile.SnapshotFile{}
 	objects := make([]string, 0)
-	objectPaths := map[string]string{}
+	objectPaths := map[string][]string{}
 	prefix := namespace + "/"
 	for raw := range strings.SplitSeq(out.Stdout, "\x00") {
 		if raw == "" {
@@ -534,7 +534,7 @@ func (s *Service) sidecarSnapshot(
 		object := fields[2]
 		files[rel] = reconcile.SnapshotFile{Path: rel, Size: size, Blob: object}
 		objects = append(objects, object)
-		objectPaths[object] = rel
+		objectPaths[object] = append(objectPaths[object], rel)
 	}
 	if len(objects) == 0 {
 		return files, nil
@@ -544,12 +544,13 @@ func (s *Service) sidecarSnapshot(
 		return nil, err
 	}
 	for object, content := range contents {
-		rel := objectPaths[object]
-		file := files[rel]
-		file.Content = content
-		file.Size = int64(len(content))
-		file.SHA256 = sha256String(content)
-		files[rel] = file
+		for _, rel := range objectPaths[object] {
+			file := files[rel]
+			file.Content = content
+			file.Size = int64(len(content))
+			file.SHA256 = sha256String(content)
+			files[rel] = file
+		}
 	}
 	return files, nil
 }
