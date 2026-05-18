@@ -1396,6 +1396,62 @@ func TestServicePushRejectsStaleRemoteAndSyncWorkflowPulls(t *testing.T) {
 	assertSidecarFile(t, remote, "repo-a/__branches__/main", "repo-a/external/SPEC.md", "# External\n")
 }
 
+func TestServiceSyncWorkflowCreatesInitialLockWhenMissing(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	remote := newBareRepo(t)
+	root := newMainRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+	git(t, root, "add", "src/auth/SPEC.md")
+	git(t, root, "commit", "-m", "bootstrap specs")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	result, err := service.SyncWorkflow(ctx, root, sidecar.SyncOptions{})
+	if err != nil {
+		t.Fatalf("sync workflow: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("expected initial sync to be ok: %#v", result)
+	}
+	if !result.Push.Committed || result.Push.ChangedFiles != 1 {
+		t.Fatalf("expected initial sync to push one file: %#v", result.Push)
+	}
+	if _, err := os.Stat(filepath.Join(root, "skeeper.lock")); err != nil {
+		t.Fatalf("expected initial sync to write skeeper.lock: %v", err)
+	}
+	assertSidecarFile(t, remote, "project/__branches__/main", "project/src/auth/SPEC.md", "# Auth\n")
+}
+
+func TestServiceSyncWorkflowRejectsMissingLockWhenRemoteBranchExists(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	remote := newBareRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	seed := newMainRepo(t)
+	bootstrapRepo(t, seed, cfg)
+	writeFile(t, seed, "src/auth/SPEC.md", "# Seed\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, seed, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+
+	root := newMainRepo(t)
+	bootstrapRepo(t, root, cfg)
+	writeFile(t, root, "src/auth/SPEC.md", "# Local\n")
+	git(t, root, "add", "src/auth/SPEC.md")
+	git(t, root, "commit", "-m", "bootstrap local specs")
+
+	_, err := service.SyncWorkflow(ctx, root, sidecar.SyncOptions{})
+	if err == nil || !strings.Contains(err.Error(), "restore skeeper.lock before pushing") {
+		t.Fatalf("expected missing-lock remote-base rejection, got %v", err)
+	}
+	assertSidecarFile(t, remote, "project/__branches__/main", "project/src/auth/SPEC.md", "# Seed\n")
+}
+
 func TestServicePushRejectsUnexpectedLocalSidecarCommits(t *testing.T) {
 	setGitIdentity(t)
 

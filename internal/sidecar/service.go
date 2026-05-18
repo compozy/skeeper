@@ -653,6 +653,24 @@ func (s *Service) SyncWorkflow(ctx context.Context, dir string, opts SyncOptions
 		}
 		return SyncWorkflowResult{OK: true, Push: push, DryRun: true}, nil
 	}
+	root, err := s.git.Root(ctx, dir)
+	if err != nil {
+		return SyncWorkflowResult{}, err
+	}
+	if _, err := os.Stat(filepath.Join(root, lockfile.Filename)); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return SyncWorkflowResult{}, fmt.Errorf("stat %s: %w", lockfile.Filename, err)
+		}
+		push, err := s.Push(ctx, dir, opts)
+		if err != nil {
+			return SyncWorkflowResult{}, err
+		}
+		return SyncWorkflowResult{
+			OK:   true,
+			Pull: PullResult{OK: true, Hydrate: HydrateResult{OK: true}},
+			Push: push,
+		}, nil
+	}
 	pull, err := s.Pull(ctx, dir, PullOptions{NoGit: true})
 	if err != nil {
 		return SyncWorkflowResult{}, err
@@ -910,8 +928,9 @@ func ensurePushHasNoRemoteBase(
 			continue
 		}
 		return fmt.Errorf(
-			"sidecar branch %s already exists but %s is missing; run `skeeper pull` before `skeeper push`",
+			"sidecar branch %s already exists but %s is missing; restore %s before pushing",
 			namespace.Branch,
+			lockfile.Filename,
 			lockfile.Filename,
 		)
 	}

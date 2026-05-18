@@ -198,5 +198,6 @@ jobs:
           binary: ${{ github.workspace }}/bin/skeeper
           working-directory: ${{ steps.fixture.outputs.project }}
           args: |
-            verify
+            status
+            --check
             --json
