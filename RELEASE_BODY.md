@@ -1,20 +1,13 @@
-## 0.3.0 - 2026-05-12
-
-
-### ♻️  Refactoring
-
-- Use pull and push commands
-
-- **BREAKING:** use pull and push commands
+## 0.3.1 - 2026-05-18
 
 
 ### 🐛 Bug Fixes
 
-- *(sidecar)* Preserve duplicate blob paths (#21)
+- Homebrew tap
+
+- Pull and push operations
 
 
-### 📚 Documentation
+### 🔧 CI/CD
 
-- Qa skills
-
-- Outdated skill
+- Lint error
