@@ -209,23 +209,32 @@ func TestBuildNamespaceDiffClassifiesPathStates(t *testing.T) {
 	diff := BuildNamespaceDiff(NamespaceDiffInput{
 		Name: "repo",
 		Locked: map[string]SnapshotFile{
-			"both.md":             {Path: "both.md", SHA256: "locked", Size: 6},
-			"local-modified.md":   {Path: "local-modified.md", SHA256: "base", Size: 4},
-			"missing.md":          {Path: "missing.md", SHA256: "locked", Size: 6},
-			"sidecar-modified.md": {Path: "sidecar-modified.md", SHA256: "locked", Size: 6},
-			"same.md":             {Path: "same.md", SHA256: "same", Size: 4},
+			"both.md":                  {Path: "both.md", SHA256: "locked", Size: 6},
+			"local-delete-conflict.md": {Path: "local-delete-conflict.md", SHA256: "locked", Size: 6},
+			"local-deleted.md":         {Path: "local-deleted.md", SHA256: "base", Size: 4},
+			"local-modified.md":        {Path: "local-modified.md", SHA256: "base", Size: 4},
+			"missing.md":               {Path: "missing.md", SHA256: "locked", Size: 6},
+			"sidecar-modified.md":      {Path: "sidecar-modified.md", SHA256: "locked", Size: 6},
+			"same.md":                  {Path: "same.md", SHA256: "same", Size: 4},
 		},
 		Local: map[string]SnapshotFile{
-			"both.md":             {Path: "both.md", SHA256: "local", Size: 5},
-			"local-modified.md":   {Path: "local-modified.md", SHA256: "local", Size: 5},
-			"local-only.md":       {Path: "local-only.md", SHA256: "local", Size: 5},
-			"sidecar-modified.md": {Path: "sidecar-modified.md", SHA256: "base", Size: 4},
-			"same.md":             {Path: "same.md", SHA256: "same", Size: 4},
+			"both.md":                   {Path: "both.md", SHA256: "local", Size: 5},
+			"local-modified.md":         {Path: "local-modified.md", SHA256: "local", Size: 5},
+			"local-only.md":             {Path: "local-only.md", SHA256: "local", Size: 5},
+			"remote-delete-conflict.md": {Path: "remote-delete-conflict.md", SHA256: "local", Size: 5},
+			"remote-deleted.md":         {Path: "remote-deleted.md", SHA256: "base", Size: 4},
+			"sidecar-modified.md":       {Path: "sidecar-modified.md", SHA256: "base", Size: 4},
+			"same.md":                   {Path: "same.md", SHA256: "same", Size: 4},
 		},
 		Base: map[string]BaseFile{
-			"both.md":             {SHA256: "base", Size: 4},
-			"local-modified.md":   {SHA256: "base", Size: 4},
-			"sidecar-modified.md": {SHA256: "base", Size: 4},
+			"both-deleted.md":           {SHA256: "base", Size: 4},
+			"both.md":                   {SHA256: "base", Size: 4},
+			"local-delete-conflict.md":  {SHA256: "base", Size: 4},
+			"local-deleted.md":          {SHA256: "base", Size: 4},
+			"local-modified.md":         {SHA256: "base", Size: 4},
+			"remote-delete-conflict.md": {SHA256: "base", Size: 4},
+			"remote-deleted.md":         {SHA256: "base", Size: 4},
+			"sidecar-modified.md":       {SHA256: "base", Size: 4},
 		},
 	})
 
@@ -234,12 +243,17 @@ func TestBuildNamespaceDiffClassifiesPathStates(t *testing.T) {
 		got[path.Path] = path.Class
 	}
 	want := map[string]PathClass{
-		"both.md":             PathBothModifiedConflict,
-		"local-modified.md":   PathLocalModified,
-		"local-only.md":       PathLocalOnly,
-		"missing.md":          PathMissingLocal,
-		"same.md":             PathUnchanged,
-		"sidecar-modified.md": PathSidecarModified,
+		"both-deleted.md":           PathUnchanged,
+		"both.md":                   PathBothModifiedConflict,
+		"local-delete-conflict.md":  PathLocalDeleteConflict,
+		"local-deleted.md":          PathLocalDeleted,
+		"local-modified.md":         PathLocalModified,
+		"local-only.md":             PathLocalOnly,
+		"missing.md":                PathMissingLocal,
+		"remote-delete-conflict.md": PathRemoteDeleteConflict,
+		"remote-deleted.md":         PathRemoteDeleted,
+		"same.md":                   PathUnchanged,
+		"sidecar-modified.md":       PathSidecarModified,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("diff path count mismatch: got %#v want %#v", got, want)

@@ -41,6 +41,8 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newPullCmd(stdout, service))
 	cmd.AddCommand(newPushCmd(stdout, service))
 	cmd.AddCommand(newRestoreCmd(stdout, service))
+	cmd.AddCommand(newDiffCmd(stdout, service))
+	cmd.AddCommand(newReconcileCmd(stdout, service))
 	cmd.AddCommand(newTrackCmd(stdout, service))
 	cmd.AddCommand(newUntrackCmd(stdout, service))
 	cmd.AddCommand(newRepairCmd(stdout, service))

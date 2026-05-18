@@ -90,7 +90,10 @@ type SyncOptions struct {
 	Staged  bool
 	Force   bool
 	Mirror  bool
-	// Pull is accepted for older call sites; strict sync always fetches/rebases.
+	// ResolveOurs is set by explicit reconciliation flows after the user chooses
+	// the local side for a sidecar conflict.
+	ResolveOurs bool
+	// Pull is accepted for older call sites; CLI sync uses SyncWorkflow.
 	Pull bool
 }
 
@@ -599,7 +602,9 @@ type HydrateResult struct {
 	Diagnostics    []reconcile.Diagnostic `json:"diagnostics,omitempty"`
 }
 
-// Sync mirrors main-tree spec files into the sidecar, pushes, writes, and stages skeeper.lock.
+// Sync is the push-only primitive: it mirrors main-tree spec files into the
+// sidecar, pushes, writes, and stages skeeper.lock. The user-facing sync
+// workflow is SyncWorkflow, which pulls before pushing.
 func (s *Service) Sync(ctx context.Context, dir string, opts SyncOptions) (SyncResult, error) {
 	return s.Push(ctx, dir, opts)
 }
@@ -692,6 +697,19 @@ func (s *Service) remoteTipLock(
 		if remoteTip == record.Commit {
 			continue
 		}
+		ancestor, err := s.isAncestor(ctx, sidecarDir, record.Commit, remoteRef)
+		if err != nil {
+			return lockfile.Lock{}, false, err
+		}
+		if !ancestor {
+			return lockfile.Lock{}, false, fmt.Errorf(
+				"sidecar branch %s is at %s, which is not a fast-forward of %s record %s",
+				record.SidecarBranch,
+				shortHash(remoteTip),
+				lockfile.Filename,
+				shortHash(record.Commit),
+			)
+		}
 		namespace, err := namespaceByName(cfg, record.Name)
 		if err != nil {
 			return lockfile.Lock{}, false, err
@@ -713,8 +731,11 @@ func pullHasOnlyLocalDrift(summary reconcile.DiffSummary) bool {
 	for _, namespace := range summary.Namespaces {
 		counts := namespace.Counts
 		if counts.MissingLocal != 0 ||
+			counts.RemoteDeleted != 0 ||
 			counts.SidecarModified != 0 ||
 			counts.BothModifiedConflict != 0 ||
+			counts.LocalDeleteConflict != 0 ||
+			counts.RemoteDeleteConflict != 0 ||
 			counts.NamespaceRemoved != 0 ||
 			counts.ConfigUnowned != 0 {
 			return false
@@ -732,7 +753,7 @@ func pullFinalSummary(hydrate HydrateResult) reconcile.DiffSummary {
 
 // Push mirrors local managed files into the sidecar without pruning remote-only files by default.
 func (s *Service) Push(ctx context.Context, dir string, opts SyncOptions) (SyncResult, error) {
-	root, _, store, err := s.loadProject(ctx, dir)
+	root, cfg, store, err := s.loadProject(ctx, dir)
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -745,6 +766,10 @@ func (s *Service) Push(ctx context.Context, dir string, opts SyncOptions) (SyncR
 	}
 	if opts.DryRun {
 		return SyncResult{DryRun: true, ChangedFiles: plan.Guardrails.Files}, nil
+	}
+	preflight, err := s.preparePush(ctx, root, cfg, plan, opts.ResolveOurs, opts.Mirror)
+	if err != nil {
+		return SyncResult{}, err
 	}
 	tx := state.Transaction{
 		Kind:       string(plan.Kind),
@@ -759,7 +784,7 @@ func (s *Service) Push(ctx context.Context, dir string, opts SyncOptions) (SyncR
 	if err != nil {
 		return SyncResult{}, err
 	}
-	result, syncErr := s.applySyncPlan(ctx, plan, opts.Mirror)
+	result, syncErr := s.applySyncPlan(ctx, plan, opts.Mirror, preflight.deletions, preflight.remoteTips)
 	if syncErr != nil {
 		return SyncResult{}, syncErr
 	}
@@ -800,6 +825,178 @@ func (s *Service) Push(ctx context.Context, dir string, opts SyncOptions) (SyncR
 		return SyncResult{}, err
 	}
 	return result, nil
+}
+
+type pushPreflight struct {
+	deletions  map[string]map[string]struct{}
+	remoteTips map[string]string
+}
+
+func (s *Service) preparePush(
+	ctx context.Context,
+	root string,
+	cfg config.Config,
+	plan reconcile.Plan,
+	resolveOurs bool,
+	mirror bool,
+) (pushPreflight, error) {
+	if err := s.ensureClone(ctx, root, cfg.Sidecar); err != nil {
+		return pushPreflight{}, err
+	}
+	sidecarDir := sidecarPath(root)
+	if _, err := s.runner.Run(ctx, sidecarDir, "git", "fetch", "origin"); err != nil {
+		return pushPreflight{}, fmt.Errorf("fetch sidecar origin: %w", err)
+	}
+	remoteTips, err := s.pushRemoteTips(ctx, sidecarDir, plan)
+	if err != nil {
+		return pushPreflight{}, err
+	}
+	lock, err := s.locks.Load(reconcile.RepoRoot(root))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return pushPreflight{}, ensurePushHasNoRemoteBase(plan, remoteTips)
+		}
+		return pushPreflight{}, err
+	}
+	if err := s.ensurePushRemoteMatchesLock(lock, plan, remoteTips); err != nil {
+		return pushPreflight{}, err
+	}
+	diff, err := s.diffProjectWithLock(ctx, root, "", true, &lock)
+	if err != nil {
+		return pushPreflight{}, err
+	}
+	if blocked := pushBlockedPaths(diff.summary, resolveOurs, mirror); len(blocked) > 0 {
+		first := blocked[0]
+		return pushPreflight{}, fmt.Errorf(
+			"push blocked by %d unmanaged sidecar drift path(s); first is %s (%s); run `skeeper pull` or inspect `skeeper status --paths`",
+			len(blocked),
+			first.Path,
+			first.Class,
+		)
+	}
+	return pushPreflight{
+		deletions:  pushDeletionPaths(diff.summary, resolveOurs),
+		remoteTips: remoteTips,
+	}, nil
+}
+
+func (s *Service) pushRemoteTips(
+	ctx context.Context,
+	sidecarDir string,
+	plan reconcile.Plan,
+) (map[string]string, error) {
+	tips := make(map[string]string, len(plan.Namespaces))
+	for _, namespace := range plan.Namespaces {
+		remoteRef := "refs/remotes/origin/" + namespace.Branch
+		if !s.git.RefExists(ctx, sidecarDir, remoteRef) {
+			tips[namespace.Branch] = ""
+			continue
+		}
+		remoteTip, err := s.revParse(ctx, sidecarDir, remoteRef)
+		if err != nil {
+			return nil, err
+		}
+		tips[namespace.Branch] = remoteTip
+	}
+	return tips, nil
+}
+
+func ensurePushHasNoRemoteBase(
+	plan reconcile.Plan,
+	remoteTips map[string]string,
+) error {
+	for _, namespace := range plan.Namespaces {
+		if remoteTips[namespace.Branch] == "" {
+			continue
+		}
+		return fmt.Errorf(
+			"sidecar branch %s already exists but %s is missing; run `skeeper pull` before `skeeper push`",
+			namespace.Branch,
+			lockfile.Filename,
+		)
+	}
+	return nil
+}
+
+func (s *Service) ensurePushRemoteMatchesLock(
+	lock lockfile.Lock,
+	plan reconcile.Plan,
+	remoteTips map[string]string,
+) error {
+	for _, namespace := range plan.Namespaces {
+		remoteTip := remoteTips[namespace.Branch]
+		if remoteTip == "" {
+			continue
+		}
+		record, ok := lockRecord(lock, string(namespace.Name))
+		if !ok {
+			return fmt.Errorf(
+				"sidecar branch %s exists but %s has no namespace %s; run `skeeper pull` before `skeeper push`",
+				namespace.Branch,
+				lockfile.Filename,
+				namespace.Name,
+			)
+		}
+		if remoteTip != record.Commit {
+			return fmt.Errorf(
+				"sidecar branch %s is at %s but %s records %s; run `skeeper pull` before `skeeper push`",
+				namespace.Branch,
+				shortHash(remoteTip),
+				lockfile.Filename,
+				shortHash(record.Commit),
+			)
+		}
+	}
+	return nil
+}
+
+func pushBlockedPaths(summary reconcile.DiffSummary, resolveOurs bool, mirror bool) []reconcile.PathDiff {
+	blocked := make([]reconcile.PathDiff, 0)
+	for _, namespace := range summary.Namespaces {
+		for _, path := range namespace.Paths {
+			if pushCanProceed(path.Class, resolveOurs, mirror) {
+				continue
+			}
+			blocked = append(blocked, path)
+		}
+	}
+	return blocked
+}
+
+func pushCanProceed(class reconcile.PathClass, resolveOurs bool, mirror bool) bool {
+	switch class {
+	case reconcile.PathUnchanged,
+		reconcile.PathLocalOnly,
+		reconcile.PathLocalDeleted,
+		reconcile.PathLocalModified:
+		return true
+	case reconcile.PathBothModifiedConflict,
+		reconcile.PathLocalDeleteConflict,
+		reconcile.PathRemoteDeleteConflict:
+		return resolveOurs
+	case reconcile.PathConfigUnowned,
+		reconcile.PathNamespaceRemoved:
+		return mirror
+	default:
+		return false
+	}
+}
+
+func pushDeletionPaths(summary reconcile.DiffSummary, resolveOurs bool) map[string]map[string]struct{} {
+	deletions := map[string]map[string]struct{}{}
+	for _, namespace := range summary.Namespaces {
+		for _, path := range namespace.Paths {
+			if path.Class != reconcile.PathLocalDeleted &&
+				(!resolveOurs || path.Class != reconcile.PathLocalDeleteConflict) {
+				continue
+			}
+			if deletions[namespace.Name] == nil {
+				deletions[namespace.Name] = map[string]struct{}{}
+			}
+			deletions[namespace.Name][path.Path] = struct{}{}
+		}
+	}
+	return deletions
 }
 
 // Verify validates skeeper.lock against the sidecar remote.
@@ -993,9 +1190,13 @@ func (s *Service) FSCK(ctx context.Context, dir string, opts FSCKOptions) (FSCKR
 	for _, namespace := range diff.summary.Namespaces {
 		if namespace.Counts.MissingLocal != 0 ||
 			namespace.Counts.LocalOnly != 0 ||
+			namespace.Counts.LocalDeleted != 0 ||
+			namespace.Counts.RemoteDeleted != 0 ||
 			namespace.Counts.LocalModified != 0 ||
 			namespace.Counts.SidecarModified != 0 ||
 			namespace.Counts.BothModifiedConflict != 0 ||
+			namespace.Counts.LocalDeleteConflict != 0 ||
+			namespace.Counts.RemoteDeleteConflict != 0 ||
 			namespace.Counts.NamespaceRemoved != 0 ||
 			namespace.Counts.ConfigUnowned != 0 {
 			result.Diagnostics = append(result.Diagnostics, diagnostic(
@@ -1863,14 +2064,27 @@ func loadLockFromPath(root, path string) (lockfile.Lock, error) {
 	return lockfile.Normalize(lock), nil
 }
 
-func (s *Service) applySyncPlan(ctx context.Context, plan reconcile.Plan, mirror bool) (SyncResult, error) {
+func (s *Service) applySyncPlan(
+	ctx context.Context,
+	plan reconcile.Plan,
+	mirror bool,
+	deletions map[string]map[string]struct{},
+	remoteTips map[string]string,
+) (SyncResult, error) {
 	root := string(plan.Root)
 	if err := s.ensureClone(ctx, root, plan.Config.Sidecar); err != nil {
 		return SyncResult{}, err
 	}
 	result := SyncResult{}
 	for _, namespace := range plan.Namespaces {
-		nsResult, err := s.applyNamespacePlan(ctx, plan, namespace, mirror)
+		nsResult, err := s.applyNamespacePlan(
+			ctx,
+			plan,
+			namespace,
+			mirror,
+			deletions[string(namespace.Name)],
+			remoteTips[namespace.Branch],
+		)
 		if err != nil {
 			return SyncResult{}, err
 		}
@@ -1891,10 +2105,12 @@ func (s *Service) applyNamespacePlan(
 	plan reconcile.Plan,
 	namespace reconcile.NamespacePlan,
 	mirror bool,
+	deletions map[string]struct{},
+	expectedTip string,
 ) (NamespaceSyncResult, error) {
 	root := string(plan.Root)
 	sidecarDir := sidecarPath(root)
-	if err := s.ensureBranch(ctx, sidecarDir, namespace.Branch); err != nil {
+	if err := s.ensureBranchAtPushBase(ctx, sidecarDir, namespace.Branch, expectedTip); err != nil {
 		return NamespaceSyncResult{}, fmt.Errorf("sync namespace %q: %w", namespace.Name, err)
 	}
 	sidecarFiles, err := findMatchedFiles(
@@ -1911,6 +2127,7 @@ func (s *Service) applyNamespacePlan(
 		namespace,
 		sidecarFiles,
 		mirror,
+		deletions,
 	); err != nil {
 		return NamespaceSyncResult{}, fmt.Errorf("mirror namespace %q: %w", namespace.Name, err)
 	}
@@ -1946,7 +2163,7 @@ func (s *Service) applyNamespacePlan(
 	return NamespaceSyncResult{
 		Name:         string(namespace.Name),
 		Branch:       namespace.Branch,
-		ChangedFiles: len(namespace.Files),
+		ChangedFiles: len(namespace.Files) + len(deletions),
 		Committed:    committed,
 		Commit:       commit,
 		Digest:       digest.Digest,
@@ -2204,7 +2421,7 @@ func (s *Service) gitConfigValue(ctx context.Context, dir string, local bool, ke
 	return gitexec.TrimmedStdout(result), nil
 }
 
-func (s *Service) ensureBranch(ctx context.Context, sidecarDir, branch string) error {
+func (s *Service) ensureBranchAtPushBase(ctx context.Context, sidecarDir, branch, expectedTip string) error {
 	if dirty, err := s.dirty(ctx, sidecarDir); err != nil {
 		return err
 	} else if dirty {
@@ -2216,16 +2433,19 @@ func (s *Service) ensureBranch(ctx context.Context, sidecarDir, branch string) e
 	if _, err := s.runner.Run(ctx, sidecarDir, "git", "fetch", "origin"); err != nil {
 		return fmt.Errorf("fetch sidecar origin: %w", err)
 	}
+	remoteRef := "refs/remotes/origin/" + branch
+	remoteExists := s.git.RefExists(ctx, sidecarDir, remoteRef)
+	if err := s.ensurePushRemoteUnchanged(ctx, sidecarDir, branch, remoteRef, expectedTip, remoteExists); err != nil {
+		return err
+	}
 	switch {
 	case s.git.RefExists(ctx, sidecarDir, "refs/heads/"+branch):
 		if _, err := s.runner.Run(ctx, sidecarDir, "git", "switch", branch); err != nil {
 			return fmt.Errorf("switch sidecar branch %q: %w", branch, err)
 		}
-	case s.git.RefExists(ctx, sidecarDir, "refs/remotes/origin/"+branch):
+	case remoteExists:
 		if _, err := s.runner.Run(ctx, sidecarDir, "git", "switch", "--track", "origin/"+branch); err != nil {
-			if _, switchErr := s.runner.Run(ctx, sidecarDir, "git", "switch", branch); switchErr != nil {
-				return fmt.Errorf("track sidecar branch %q: %w", branch, err)
-			}
+			return fmt.Errorf("track sidecar branch %q: %w", branch, err)
 		}
 	default:
 		if _, err := s.runner.Run(ctx, sidecarDir, "git", "switch", "--orphan", branch); err != nil {
@@ -2239,12 +2459,102 @@ func (s *Service) ensureBranch(ctx context.Context, sidecarDir, branch string) e
 		}
 		return nil
 	}
-	if s.git.RefExists(ctx, sidecarDir, "refs/remotes/origin/"+branch) {
-		if _, err := s.runner.Run(ctx, sidecarDir, "git", "rebase", "origin/"+branch); err != nil {
-			return fmt.Errorf("rebase sidecar branch %q: %w", branch, err)
+	if expectedTip == "" {
+		return nil
+	}
+	return s.ensureBranchHeadAtTip(ctx, sidecarDir, branch, expectedTip)
+}
+
+func (s *Service) ensurePushRemoteUnchanged(
+	ctx context.Context,
+	sidecarDir string,
+	branch string,
+	remoteRef string,
+	expectedTip string,
+	remoteExists bool,
+) error {
+	if expectedTip == "" {
+		if remoteExists {
+			return fmt.Errorf(
+				"sidecar branch %s was created during push; run `skeeper pull` before `skeeper push`",
+				branch,
+			)
 		}
+		return nil
+	}
+	if !remoteExists {
+		return fmt.Errorf(
+			"sidecar branch %s disappeared during push; run `skeeper pull` before `skeeper push`",
+			branch,
+		)
+	}
+	remoteTip, err := s.revParse(ctx, sidecarDir, remoteRef)
+	if err != nil {
+		return err
+	}
+	if remoteTip != expectedTip {
+		return fmt.Errorf(
+			"sidecar branch %s changed from %s to %s during push; run `skeeper pull` before `skeeper push`",
+			branch,
+			shortHash(expectedTip),
+			shortHash(remoteTip),
+		)
 	}
 	return nil
+}
+
+func (s *Service) ensureBranchHeadAtTip(ctx context.Context, sidecarDir, branch, expectedTip string) error {
+	head, err := s.revParse(ctx, sidecarDir, "HEAD")
+	if err != nil {
+		return err
+	}
+	if head == expectedTip {
+		return nil
+	}
+	if err := s.ensureAncestor(ctx, sidecarDir, "HEAD", expectedTip, branch); err != nil {
+		return err
+	}
+	if _, err := s.runner.Run(ctx, sidecarDir, "git", "merge", "--ff-only", expectedTip); err != nil {
+		return fmt.Errorf("fast-forward sidecar branch %q to push base: %w", branch, err)
+	}
+	head, err = s.revParse(ctx, sidecarDir, "HEAD")
+	if err != nil {
+		return err
+	}
+	if head != expectedTip {
+		return fmt.Errorf(
+			"sidecar branch %s did not reach expected push base %s; run `skeeper repair --check`",
+			branch,
+			shortHash(expectedTip),
+		)
+	}
+	return nil
+}
+
+func (s *Service) ensureAncestor(ctx context.Context, sidecarDir, ancestor, descendant, branch string) error {
+	ok, err := s.isAncestor(ctx, sidecarDir, ancestor, descendant)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf(
+			"sidecar branch %s has local commits outside expected push base %s; run `skeeper repair --check`",
+			branch,
+			shortHash(descendant),
+		)
+	}
+	return nil
+}
+
+func (s *Service) isAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
+	if _, err := s.runner.Run(ctx, dir, "git", "merge-base", "--is-ancestor", ancestor, descendant); err != nil {
+		var commandErr *gitexec.CommandError
+		if errors.As(err, &commandErr) && commandErr.ExitCode == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("check git ancestry: %w", err)
+	}
+	return true, nil
 }
 
 func (s *Service) commitAndPushNamespace(
@@ -2290,17 +2600,7 @@ func (s *Service) pushBranch(ctx context.Context, sidecarDir, branch string) err
 		return nil
 	}
 	if _, err := s.runner.Run(ctx, sidecarDir, "git", "push", "-u", "origin", branch); err != nil {
-		if _, fetchErr := s.runner.Run(ctx, sidecarDir, "git", "fetch", "origin"); fetchErr != nil {
-			return fmt.Errorf("push sidecar branch %q: %w", branch, err)
-		}
-		if s.git.RefExists(ctx, sidecarDir, "refs/remotes/origin/"+branch) {
-			if _, rebaseErr := s.runner.Run(ctx, sidecarDir, "git", "rebase", "origin/"+branch); rebaseErr != nil {
-				return fmt.Errorf("rebase after push rejection for %q: %w", branch, rebaseErr)
-			}
-		}
-		if _, retryErr := s.runner.Run(ctx, sidecarDir, "git", "push", "-u", "origin", branch); retryErr != nil {
-			return fmt.Errorf("push sidecar branch %q: %w", branch, retryErr)
-		}
+		return fmt.Errorf("push sidecar branch %q: %w", branch, err)
 	}
 	return nil
 }
@@ -2388,6 +2688,7 @@ func mirrorFiles(
 	namespace reconcile.NamespacePlan,
 	sidecarFiles []string,
 	mirror bool,
+	deletions map[string]struct{},
 ) error {
 	mainSet := make(map[string]struct{}, len(namespace.Files))
 	for _, file := range namespace.Files {
@@ -2401,6 +2702,12 @@ func mirrorFiles(
 		}
 		if err := copyFile(filepath.Join(root, filepath.FromSlash(file.Path)), dst); err != nil {
 			return err
+		}
+	}
+	for file := range deletions {
+		path := filepath.Join(sidecarDir, filepath.FromSlash(file))
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove sidecar file %s: %w", file, err)
 		}
 	}
 	if mirror {

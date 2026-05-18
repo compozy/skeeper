@@ -6,10 +6,10 @@
     {
       "name": "skeeper",
       "sidecar_branch": "skeeper/__branches__/main",
-      "commit": "0962f04d2eaea90b300bbd0c6b4be427a90de7af",
-      "digest": "sha256:cdd02fffe95e5fbfed5b2c13978c39e3db9c74f324d376156daca7a3512939e6",
-      "files": 24,
-      "bytes": 131659
+      "commit": "70016f0e4a19ede99487c2de0a9ae7aecb1cc88d",
+      "digest": "sha256:005e8f1aff52f3a554675dad3974e8f2b6589ddf1ea2c9017938a1cff5dc33b4",
+      "files": 34,
+      "bytes": 172935
     }
   ]
 }

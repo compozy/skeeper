@@ -198,7 +198,7 @@ func (s *Service) syncAfterHydrate(
 	if !opts.AdoptLocal && !opts.Ours {
 		return nil
 	}
-	syncResult, err := s.Sync(ctx, diff.root, SyncOptions{Force: true})
+	syncResult, err := s.Sync(ctx, diff.root, SyncOptions{Force: true, ResolveOurs: opts.Ours})
 	if err != nil {
 		return err
 	}
@@ -478,7 +478,7 @@ func (s *Service) diffNamespaces(
 		} else {
 			local[record.Name] = map[string]reconcile.SnapshotFile{}
 		}
-		base := baseSnapshot(journal, record.Name)
+		base := baseSnapshot(journal, lock.SourceBranch, record.Name)
 		nsDiff := reconcile.BuildNamespaceDiff(reconcile.NamespaceDiffInput{
 			Name:         record.Name,
 			Branch:       record.SidecarBranch,
@@ -623,8 +623,15 @@ func localSnapshot(root string, namespace reconcile.NamespacePlan) (map[string]r
 	return files, nil
 }
 
-func baseSnapshot(journal state.HydrationJournal, namespace string) map[string]reconcile.BaseFile {
+func baseSnapshot(
+	journal state.HydrationJournal,
+	sourceBranch string,
+	namespace string,
+) map[string]reconcile.BaseFile {
 	result := map[string]reconcile.BaseFile{}
+	if journal.SourceBranch != sourceBranch {
+		return result
+	}
 	ns, ok := journal.Namespaces[namespace]
 	if !ok {
 		return result
@@ -665,12 +672,20 @@ func incrementNamespaceCount(counts *reconcile.ClassCount, class reconcile.PathC
 		counts.MissingLocal++
 	case reconcile.PathLocalOnly:
 		counts.LocalOnly++
+	case reconcile.PathLocalDeleted:
+		counts.LocalDeleted++
+	case reconcile.PathRemoteDeleted:
+		counts.RemoteDeleted++
 	case reconcile.PathLocalModified:
 		counts.LocalModified++
 	case reconcile.PathSidecarModified:
 		counts.SidecarModified++
 	case reconcile.PathBothModifiedConflict:
 		counts.BothModifiedConflict++
+	case reconcile.PathLocalDeleteConflict:
+		counts.LocalDeleteConflict++
+	case reconcile.PathRemoteDeleteConflict:
+		counts.RemoteDeleteConflict++
 	case reconcile.PathNamespaceRemoved:
 		counts.NamespaceRemoved++
 	case reconcile.PathConfigUnowned:
@@ -734,19 +749,50 @@ func hydrateBlockedPaths(summary reconcile.DiffSummary, opts HydrateOptions) []r
 
 func hydrateCanProceed(class reconcile.PathClass, opts HydrateOptions) bool {
 	switch class {
-	case reconcile.PathUnchanged, reconcile.PathMissingLocal, reconcile.PathSidecarModified:
+	case reconcile.PathUnchanged,
+		reconcile.PathMissingLocal,
+		reconcile.PathSidecarModified,
+		reconcile.PathRemoteDeleted:
 		return true
 	case reconcile.PathLocalOnly:
-		return opts.KeepLocal || opts.AdoptLocal || opts.PruneLocal || opts.Ours
+		return hydrateAllowsLocalOnly(opts)
+	case reconcile.PathLocalDeleted:
+		return hydrateAllowsLocalDeleted(opts)
 	case reconcile.PathLocalModified:
-		return opts.KeepLocal || opts.AdoptLocal || opts.Ours || opts.Theirs || opts.Merge
+		return hydrateAllowsLocalModified(opts)
 	case reconcile.PathBothModifiedConflict:
-		return opts.Ours || opts.Theirs || opts.Merge
+		return hydrateAllowsConflict(opts)
+	case reconcile.PathLocalDeleteConflict, reconcile.PathRemoteDeleteConflict:
+		return hydrateAllowsDeleteConflict(opts)
 	case reconcile.PathConfigUnowned, reconcile.PathNamespaceRemoved:
-		return opts.PruneLocal || opts.Theirs || opts.Ours
+		return hydrateAllowsUnowned(opts)
 	default:
 		return false
 	}
+}
+
+func hydrateAllowsLocalOnly(opts HydrateOptions) bool {
+	return opts.KeepLocal || opts.AdoptLocal || opts.PruneLocal || opts.Ours
+}
+
+func hydrateAllowsLocalDeleted(opts HydrateOptions) bool {
+	return opts.KeepLocal || opts.AdoptLocal || opts.Ours || opts.Theirs
+}
+
+func hydrateAllowsLocalModified(opts HydrateOptions) bool {
+	return opts.KeepLocal || opts.AdoptLocal || opts.Ours || opts.Theirs || opts.Merge
+}
+
+func hydrateAllowsConflict(opts HydrateOptions) bool {
+	return opts.Ours || opts.Theirs || opts.Merge
+}
+
+func hydrateAllowsDeleteConflict(opts HydrateOptions) bool {
+	return opts.Ours || opts.Theirs
+}
+
+func hydrateAllowsUnowned(opts HydrateOptions) bool {
+	return opts.PruneLocal || opts.Theirs || opts.Ours
 }
 
 func (s *Service) rescueForHydrate(
@@ -784,62 +830,15 @@ func (s *Service) applyHydrateFiles(
 	restored := make([]string, 0)
 	skipped := make([]string, 0)
 	for _, namespace := range diff.summary.Namespaces {
-		locked := diff.locked[namespace.Name]
 		for _, path := range namespace.Paths {
-			file, hasLocked := locked[path.Path]
-			switch path.Class {
-			case reconcile.PathUnchanged:
-				skipped = append(skipped, path.Path)
-			case reconcile.PathMissingLocal, reconcile.PathSidecarModified:
-				if !hasLocked {
-					continue
-				}
-				if err := writeStringFile(
-					filepath.Join(diff.root, filepath.FromSlash(path.Path)),
-					file.Content,
-				); err != nil {
-					return nil, nil, err
-				}
+			action, err := s.applyHydratePath(ctx, diff, opts, namespace.Name, path)
+			if err != nil {
+				return nil, nil, err
+			}
+			switch action {
+			case hydratePathRestored:
 				restored = append(restored, path.Path)
-			case reconcile.PathLocalModified:
-				switch {
-				case opts.Theirs:
-					if err := writeStringFile(
-						filepath.Join(diff.root, filepath.FromSlash(path.Path)),
-						file.Content,
-					); err != nil {
-						return nil, nil, err
-					}
-					restored = append(restored, path.Path)
-				default:
-					skipped = append(skipped, path.Path)
-				}
-			case reconcile.PathBothModifiedConflict:
-				switch {
-				case opts.Theirs:
-					if err := writeStringFile(
-						filepath.Join(diff.root, filepath.FromSlash(path.Path)),
-						file.Content,
-					); err != nil {
-						return nil, nil, err
-					}
-					restored = append(restored, path.Path)
-				case opts.Merge:
-					merged, err := s.mergePath(ctx, diff, namespace.Name, path)
-					if err != nil {
-						return nil, nil, err
-					}
-					if err := writeStringFile(
-						filepath.Join(diff.root, filepath.FromSlash(path.Path)),
-						merged,
-					); err != nil {
-						return nil, nil, err
-					}
-					restored = append(restored, path.Path)
-				default:
-					skipped = append(skipped, path.Path)
-				}
-			default:
+			case hydratePathSkipped:
 				skipped = append(skipped, path.Path)
 			}
 		}
@@ -847,6 +846,162 @@ func (s *Service) applyHydrateFiles(
 	sort.Strings(restored)
 	sort.Strings(skipped)
 	return restored, skipped, nil
+}
+
+type hydratePathAction int
+
+const (
+	hydratePathSkipped hydratePathAction = iota
+	hydratePathRestored
+)
+
+func (s *Service) applyHydratePath(
+	ctx context.Context,
+	diff *projectDiff,
+	opts HydrateOptions,
+	namespace string,
+	path reconcile.PathDiff,
+) (hydratePathAction, error) {
+	locked := diff.locked[namespace]
+	file, hasLocked := locked[path.Path]
+	switch path.Class {
+	case reconcile.PathUnchanged:
+		return hydratePathSkipped, nil
+	case reconcile.PathMissingLocal, reconcile.PathSidecarModified:
+		return writeLockedHydrateFile(diff.root, path.Path, file, hasLocked)
+	case reconcile.PathLocalModified:
+		return hydrateLocalModified(diff.root, opts, path.Path, file)
+	case reconcile.PathLocalOnly, reconcile.PathConfigUnowned, reconcile.PathNamespaceRemoved:
+		return hydrateLocalOnly(diff.root, opts, path.Path)
+	case reconcile.PathLocalDeleted:
+		return hydrateLocalDeleted(diff.root, opts, path.Path, file, hasLocked)
+	case reconcile.PathRemoteDeleted:
+		return hydrateRemoteDeleted(diff.root, opts, path.Path)
+	case reconcile.PathLocalDeleteConflict:
+		return hydrateLocalDeleteConflict(diff.root, opts, path.Path, file, hasLocked)
+	case reconcile.PathRemoteDeleteConflict:
+		return hydrateRemoteDeleteConflict(diff.root, opts, path.Path)
+	case reconcile.PathBothModifiedConflict:
+		return s.hydrateBothModified(ctx, diff, opts, namespace, path, file)
+	default:
+		return hydratePathSkipped, nil
+	}
+}
+
+func writeLockedHydrateFile(
+	root string,
+	path string,
+	file reconcile.SnapshotFile,
+	hasLocked bool,
+) (hydratePathAction, error) {
+	if !hasLocked {
+		return hydratePathSkipped, nil
+	}
+	if err := writeStringFile(filepath.Join(root, filepath.FromSlash(path)), file.Content); err != nil {
+		return hydratePathSkipped, err
+	}
+	return hydratePathRestored, nil
+}
+
+func hydrateLocalModified(
+	root string,
+	opts HydrateOptions,
+	path string,
+	file reconcile.SnapshotFile,
+) (hydratePathAction, error) {
+	if !opts.Theirs {
+		return hydratePathSkipped, nil
+	}
+	return writeLockedHydrateFile(root, path, file, true)
+}
+
+func hydrateLocalOnly(root string, opts HydrateOptions, path string) (hydratePathAction, error) {
+	if !opts.PruneLocal && !opts.Theirs {
+		return hydratePathSkipped, nil
+	}
+	if err := removeLocalFile(root, path); err != nil {
+		return hydratePathSkipped, err
+	}
+	return hydratePathRestored, nil
+}
+
+func hydrateLocalDeleted(
+	root string,
+	opts HydrateOptions,
+	path string,
+	file reconcile.SnapshotFile,
+	hasLocked bool,
+) (hydratePathAction, error) {
+	if !opts.Theirs {
+		return hydratePathSkipped, nil
+	}
+	return writeLockedHydrateFile(root, path, file, hasLocked)
+}
+
+func hydrateRemoteDeleted(root string, opts HydrateOptions, path string) (hydratePathAction, error) {
+	if opts.Ours {
+		return hydratePathSkipped, nil
+	}
+	if err := removeLocalFile(root, path); err != nil {
+		return hydratePathSkipped, err
+	}
+	return hydratePathRestored, nil
+}
+
+func hydrateLocalDeleteConflict(
+	root string,
+	opts HydrateOptions,
+	path string,
+	file reconcile.SnapshotFile,
+	hasLocked bool,
+) (hydratePathAction, error) {
+	if !opts.Theirs {
+		return hydratePathSkipped, nil
+	}
+	return writeLockedHydrateFile(root, path, file, hasLocked)
+}
+
+func hydrateRemoteDeleteConflict(root string, opts HydrateOptions, path string) (hydratePathAction, error) {
+	if !opts.Theirs {
+		return hydratePathSkipped, nil
+	}
+	if err := removeLocalFile(root, path); err != nil {
+		return hydratePathSkipped, err
+	}
+	return hydratePathRestored, nil
+}
+
+func (s *Service) hydrateBothModified(
+	ctx context.Context,
+	diff *projectDiff,
+	opts HydrateOptions,
+	namespace string,
+	path reconcile.PathDiff,
+	file reconcile.SnapshotFile,
+) (hydratePathAction, error) {
+	switch {
+	case opts.Theirs:
+		return writeLockedHydrateFile(diff.root, path.Path, file, true)
+	case opts.Merge:
+		merged, err := s.mergePath(ctx, diff, namespace, path)
+		if err != nil {
+			return hydratePathSkipped, err
+		}
+		if err := writeStringFile(filepath.Join(diff.root, filepath.FromSlash(path.Path)), merged); err != nil {
+			return hydratePathSkipped, err
+		}
+		return hydratePathRestored, nil
+	default:
+		return hydratePathSkipped, nil
+	}
+}
+
+func removeLocalFile(root, rel string) error {
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove local file %s: %w", rel, err)
+	}
+	return nil
 }
 
 func (s *Service) mergePath(

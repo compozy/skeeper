@@ -29,10 +29,10 @@ It mirrors `SPEC.md`, ADRs, RFCs, and AI plan files into a sidecar Git repositor
 - **Specs stay local to their code.** Edit `SPEC.md`, `docs/specs/**`, `.claude/plans/**`, ADRs, RFCs, or custom globs where they naturally belong.
 - **Shared sidecars without collisions.** Namespaces isolate stored paths and sidecar branches inside one sidecar remote.
 - **Branch-aware history.** Namespace branches use `<namespace>/__branches__/<source-branch>`.
-- **Git-like spec sync.** `skeeper pull` brings remote docs in, `skeeper push` publishes local docs, and `skeeper sync` runs pull then push.
-- **Safe by default.** Manual push does not delete remote-only docs just because this clone does not have them; destructive pruning requires `--prune`.
+- **Git-like spec sync.** `skeeper pull` brings remote docs in, applies safe remote deletes, `skeeper push` publishes local docs and safe local deletes, and `skeeper sync` runs pull then push.
+- **Safe by default.** Push rejects sidecar branches whose remote tip does not match the local `skeeper.lock`; destructive pruning without a known base still requires `--prune`.
 - **Fresh-clone restore.** `skeeper restore --all` restores files from the exact sidecar commits recorded in `skeeper.lock`.
-- **Small command surface.** Daily use is `status`, `pull`, `push`, `sync`, `restore`, `track`, `untrack`, `repair`, `log`, and `version`; Git hook plumbing lives behind hidden `skeeper internal` commands.
+- **Small command surface.** Daily use is `status`, `pull`, `push`, `sync`, `diff`, `reconcile`, `restore`, `track`, `untrack`, `repair`, `log`, and `version`; Git hook plumbing lives behind hidden `skeeper internal` commands.
 - **Skill for AI agents.** A bundled skill at [`skills/skeeper/SKILL.md`](skills/skeeper/SKILL.md) teaches coding agents the strict-sync workflow, namespaces, and recovery commands.
 
 ## 🎯 Who Is This For
@@ -92,7 +92,7 @@ Prerequisites:
 
 Spec files live in the main worktree but are ignored by the main repository through a managed `.gitignore` block. The sidecar repository stores mirrored files under `<namespace>/<path>` and pushes them to `<namespace>/__branches__/<source-branch>`.
 
-On commit, the managed `pre-commit` block runs last. On automatic merge commits, the managed `pre-merge-commit` block runs the same strict sync path because Git does not run `pre-commit` for merge commits. Both hooks build a plan from the staged index plus explicitly owned ignored/untracked spec paths, fetch and rebase sidecar branches, mirror content into `.skeeper/`, commit and push the sidecar, write `skeeper.lock`, and stage that lock before Git creates the main commit.
+On commit, the managed `pre-commit` block runs last. On automatic merge commits, the managed `pre-merge-commit` block runs the same strict sync path because Git does not run `pre-commit` for merge commits. Both hooks build a plan from the staged index plus explicitly owned ignored/untracked spec paths, fetch sidecar refs, verify the sidecar branch still matches `skeeper.lock`, mirror content into `.skeeper/`, commit and push the sidecar, write `skeeper.lock`, and stage that lock before Git creates the main commit.
 
 ```mermaid
 flowchart TD
@@ -101,7 +101,7 @@ flowchart TD
 
     subgraph Block [📦 Skeeper pre-commit block]
         direction TB
-        S1[🧮 Reconcile staged specs<br/>+ ownership] --> S2[🔄 Fetch &amp; rebase<br/>sidecar branch]
+        S1[🧮 Reconcile staged specs<br/>+ ownership] --> S2[🔄 Fetch &amp; verify<br/>sidecar base]
         S2 --> S3[🪞 Mirror namespace files<br/>into .skeeper/]
         S3 --> S4[📤 Commit &amp; push sidecar]
         S4 --> S5[🔒 Write &amp; stage<br/>skeeper.lock]
@@ -265,7 +265,7 @@ Run `init` once per main repository. Without flags in an interactive terminal, i
 skeeper status [--json] [--check] [--paths]
 ```
 
-Use `status` before guessing. It reports sidecar URL, current branch, lock state, hook health, namespace drift counts, bypass state, active transactions, diagnostics, and a next-action line. `--check` exits non-zero when Skeeper needs action, making it the CI health check. `--paths` includes per-path drift classes such as `local_only`, `missing_local`, `local_modified`, and `both_modified_conflict`.
+Use `status` before guessing. It reports sidecar URL, current branch, lock state, hook health, namespace drift counts, bypass state, active transactions, diagnostics, and a next-action line. `--check` exits non-zero when Skeeper needs action, making it the CI health check. `--paths` includes per-path drift classes such as `local_only`, `local_deleted`, `remote_deleted`, `local_modified`, and `both_modified_conflict`.
 
 </details>
 
@@ -278,13 +278,25 @@ skeeper push [--dry-run] [--json] [--commit --message <msg>] [--force] [--prune]
 skeeper sync [--dry-run] [--json] [--commit --message <msg>] [--force] [--prune]
 ```
 
-Use `pull` to fetch sidecar refs and materialize remote docs into the working tree while preserving local docs. It fast-forwards the main repo unless `--no-git` is set.
+Use `pull` to fetch sidecar refs, materialize remote docs into the working tree, and apply remote deletes when the local file still matches the last hydrated base. It fast-forwards the main repo unless `--no-git` is set.
 
-Use `push` to publish local managed docs, write `skeeper.lock`, and stage the lockfile. By default `push` is non-destructive: remote-only docs stay in the sidecar.
+Use `push` to publish local managed docs and safe local deletes, write `skeeper.lock`, and stage the lockfile. It rejects sidecar branches whose remote tip does not match the local lock; run `skeeper pull` or `skeeper sync` first.
 
-Use `sync` for the common two-clone flow. It runs a sidecar pull, then a push, so disjoint docs from two clones converge to the union.
+Use `sync` for the common two-clone flow. It runs a sidecar pull, then a push, so disjoint additions converge and deletions propagate when they can be proven against the hydration base.
 
-`--prune` is explicit and destructive: it deletes remote-only sidecar files that are absent locally.
+`--prune` is explicit and destructive: it deletes remote-only sidecar files that are absent locally even when they do not have a trusted local deletion base.
+
+</details>
+
+<details>
+<summary><code>skeeper diff</code> and <code>reconcile</code> — Inspect and resolve drift</summary>
+
+```bash
+skeeper diff [--json] [--namespace <name>] [--class <path-class>...]
+skeeper reconcile [--dry-run] [--json] [--adopt-local|--prune-local|--merge|--ours|--theirs]
+```
+
+Use `diff` to inspect the lock/worktree/base comparison without mutating files. Use `reconcile` when Skeeper blocks on ambiguous local-vs-sidecar drift: `--ours` publishes the local side, `--theirs` applies the sidecar side with rescue where local data would be lost, `--merge` writes conflict markers for both-modified files, `--adopt-local` publishes local-only changes, and `--prune-local` moves local-only files into rescue storage.
 
 </details>
 
@@ -394,7 +406,7 @@ Run `skeeper repair` to ensure hooks and merge-driver wiring are configured, the
 
 **`skeeper pull` or `skeeper restore` is blocked by local managed files**
 
-Run `skeeper status --paths` to inspect exact paths. Use `skeeper sync` when local-only docs should be merged with remote docs. Use `skeeper push --prune` only when the local set is intentionally authoritative and remote-only docs should be pruned.
+Run `skeeper status --paths` or `skeeper diff` to inspect exact paths. Use `skeeper sync` when local-only docs or local deletes should be published. Use `skeeper reconcile --ours` or `--theirs` for conflicts. Use `skeeper push --prune` only when the local set is intentionally authoritative and remote-only docs without a trusted local deletion base should be pruned.
 
 **`status --check` reports a lock mismatch**
 

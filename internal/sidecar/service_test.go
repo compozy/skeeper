@@ -13,6 +13,7 @@ import (
 	"github.com/compozy/skeeper/internal/config"
 	"github.com/compozy/skeeper/internal/gitexec"
 	"github.com/compozy/skeeper/internal/lockfile"
+	"github.com/compozy/skeeper/internal/reconcile"
 	"github.com/compozy/skeeper/internal/sidecar"
 	"github.com/compozy/skeeper/internal/state"
 )
@@ -36,7 +37,7 @@ func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
 
 	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
 	service := sidecar.New(&gitexec.ExecRunner{})
-	result, err := service.Sync(ctx, root, sidecar.SyncOptions{Mirror: true})
+	result, err := service.Sync(ctx, root, sidecar.SyncOptions{})
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -97,6 +98,9 @@ func TestServiceSyncHydrateStatusAndLogWithRealGit(t *testing.T) {
 	}
 	if err := os.Remove(filepath.Join(root, "src/auth/SPEC.md")); err != nil {
 		t.Fatalf("remove main spec: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, ".git", "skeeper", "hydration.json")); err != nil {
+		t.Fatalf("remove hydration journal: %v", err)
 	}
 	hydrated, err := service.Hydrate(ctx, root)
 	if err != nil {
@@ -535,8 +539,11 @@ func TestServiceHydrateOursKeepsLocalModifiedAndRestoresMissing(t *testing.T) {
 		t.Fatalf("expected ours hydrate to adopt local changes: %#v", result)
 	}
 	assertFile(t, filepath.Join(root, "src/auth/SPEC.md"), "# Auth local\n")
-	assertFile(t, filepath.Join(root, "src/billing/SPEC.md"), "# Billing base\n")
+	if _, err := os.Stat(filepath.Join(root, "src/billing/SPEC.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected local billing spec to stay deleted, stat err=%v", err)
+	}
 	assertSidecarFile(t, remote, "project/__branches__/main", "project/src/auth/SPEC.md", "# Auth local\n")
+	assertSidecarMissing(t, remote, "project/__branches__/main", "project/src/billing/SPEC.md")
 }
 
 func TestServiceHydrateMergeMaterializesConflictMarkers(t *testing.T) {
@@ -990,7 +997,7 @@ func TestServiceSyncMirrorsDeletes(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "src/auth/SPEC.md")); err != nil {
 		t.Fatalf("remove spec: %v", err)
 	}
-	result, err := service.Sync(ctx, root, sidecar.SyncOptions{Mirror: true})
+	result, err := service.Sync(ctx, root, sidecar.SyncOptions{})
 	if err != nil {
 		t.Fatalf("delete sync: %v", err)
 	}
@@ -999,6 +1006,120 @@ func TestServiceSyncMirrorsDeletes(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, sidecar.DirName, "project/src/auth/SPEC.md")); !os.IsNotExist(err) {
 		t.Fatalf("expected sidecar spec to be removed, stat err=%v", err)
+	}
+}
+
+func TestServicePullAppliesRemoteDeletesWhenLocalMatchesBase(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	remote := newBareRepo(t)
+	service := sidecar.New(&gitexec.ExecRunner{})
+	repoA := newMainRepo(t)
+	repoB := newMainRepo(t)
+	cfg := singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"})
+	bootstrapRepo(t, repoA, cfg)
+	bootstrapRepo(t, repoB, cfg)
+
+	writeFile(t, repoA, "src/auth/SPEC.md", "# Auth\n")
+	if _, err := service.Sync(ctx, repoA, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync repo A: %v", err)
+	}
+	lockData, err := os.ReadFile(filepath.Join(repoA, lockfile.Filename))
+	if err != nil {
+		t.Fatalf("read repo A lock: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoB, lockfile.Filename), lockData, 0o644); err != nil {
+		t.Fatalf("write repo B lock: %v", err)
+	}
+	writeFile(t, repoB, "src/auth/SPEC.md", "# Auth\n")
+	if _, err := service.Hydrate(ctx, repoB); err != nil {
+		t.Fatalf("hydrate repo B base: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(repoA, "src/auth/SPEC.md")); err != nil {
+		t.Fatalf("remove repo A spec: %v", err)
+	}
+	if _, err := service.Sync(ctx, repoA, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync repo A delete: %v", err)
+	}
+
+	pulled, err := service.Pull(ctx, repoB, sidecar.PullOptions{NoGit: true})
+	if err != nil {
+		t.Fatalf("pull repo B: %v", err)
+	}
+	if !pulled.OK || !pulled.LockUpdated {
+		t.Fatalf("expected pull to apply remote delete and update lock: %#v", pulled)
+	}
+	if _, err := os.Stat(filepath.Join(repoB, "src/auth/SPEC.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected repo B spec removed by pull, stat err=%v", err)
+	}
+}
+
+func TestServicePullRejectsRemoteTipRewind(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	remote := newBareRepo(t)
+	root := newMainRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth v1\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	firstTip := gitOutput(t, "", "--git-dir", remote, "rev-parse", "project/__branches__/main")
+
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth v2\n")
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	git(t, "", "--git-dir", remote, "update-ref", "refs/heads/project/__branches__/main", firstTip)
+
+	_, err := service.Pull(ctx, root, sidecar.PullOptions{NoGit: true})
+	if err == nil || !strings.Contains(err.Error(), "not a fast-forward") {
+		t.Fatalf("expected remote rewind rejection, got %v", err)
+	}
+	assertFile(t, filepath.Join(root, "src/auth/SPEC.md"), "# Auth v2\n")
+}
+
+func TestServiceDiffIgnoresHydrationJournalWithoutSourceBranch(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	remote := newBareRepo(t)
+	root := newMainRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	store := state.New(filepath.Join(root, ".git", "skeeper"))
+	journal, ok, err := store.LoadHydration(ctx)
+	if err != nil || !ok {
+		t.Fatalf("load hydration: ok=%v err=%v", ok, err)
+	}
+	journal.SourceBranch = ""
+	if err := store.WriteHydration(ctx, journal); err != nil {
+		t.Fatalf("write legacy hydration: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, "src/auth/SPEC.md")); err != nil {
+		t.Fatalf("remove spec: %v", err)
+	}
+
+	summary, err := service.Diff(ctx, root, sidecar.DiffOptions{})
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	if len(summary.Namespaces) != 1 || len(summary.Namespaces[0].Paths) != 1 {
+		t.Fatalf("unexpected diff summary: %#v", summary)
+	}
+	path := summary.Namespaces[0].Paths[0]
+	if path.Class != reconcile.PathMissingLocal {
+		t.Fatalf("expected legacy branchless base to be ignored, got %#v", path)
 	}
 }
 
@@ -1065,6 +1186,9 @@ func TestServiceSyncUsesMultipleNamespacesAndSidecarBranches(t *testing.T) {
 	}
 	if err := os.Remove(filepath.Join(repoB, "src/auth/SPEC.md")); err != nil {
 		t.Fatalf("remove repo B spec: %v", err)
+	}
+	if err := os.Remove(filepath.Join(repoB, ".git", "skeeper", "hydration.json")); err != nil {
+		t.Fatalf("remove repo B hydration journal: %v", err)
 	}
 	hydrated, err := service.Hydrate(ctx, repoB)
 	if err != nil {
@@ -1159,14 +1283,11 @@ func TestServiceSyncRequiresRepairAfterFailedPushBeforeRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repair status: %v", err)
 	}
-	if repair.Transaction == nil {
-		t.Fatal("expected failed sync to leave a transaction journal")
+	if repair.Transaction != nil {
+		t.Fatalf("expected preflight failure to avoid transaction journal, got %#v", repair.Transaction)
 	}
 
 	git(t, sidecarDir, "remote", "set-url", "origin", remote)
-	if err := service.RepairAbort(ctx, root); err != nil {
-		t.Fatalf("repair abort: %v", err)
-	}
 	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
 		t.Fatalf("retry sync: %v", err)
 	}
@@ -1232,7 +1353,7 @@ func TestServiceHookSyncBlocksOnNamespaceSpecificFailure(t *testing.T) {
 	}
 }
 
-func TestServiceSyncPullRebasesNamespacedBranch(t *testing.T) {
+func TestServicePushRejectsStaleRemoteAndSyncWorkflowPulls(t *testing.T) {
 	setGitIdentity(t)
 
 	ctx := context.Background()
@@ -1260,14 +1381,46 @@ func TestServiceSyncPullRebasesNamespacedBranch(t *testing.T) {
 	git(t, external, "commit", "-m", "external sidecar update")
 	git(t, external, "push", "origin", "repo-a/__branches__/main")
 
-	result, err := service.Sync(ctx, root, sidecar.SyncOptions{Pull: true})
+	_, err := service.Push(ctx, root, sidecar.SyncOptions{})
+	if err == nil || !strings.Contains(err.Error(), "run `skeeper pull` before `skeeper push`") {
+		t.Fatalf("expected stale push rejection, got %v", err)
+	}
+	result, err := service.SyncWorkflow(ctx, root, sidecar.SyncOptions{})
 	if err != nil {
-		t.Fatalf("sync pull: %v", err)
+		t.Fatalf("sync workflow: %v", err)
 	}
-	if result.Committed {
-		t.Fatal("expected default sync to preserve external-only spec without a deletion commit")
+	if result.Push.Committed {
+		t.Fatal("expected sync workflow to converge without a deletion commit")
 	}
+	assertFile(t, filepath.Join(root, "external/SPEC.md"), "# External\n")
 	assertSidecarFile(t, remote, "repo-a/__branches__/main", "repo-a/external/SPEC.md", "# External\n")
+}
+
+func TestServicePushRejectsUnexpectedLocalSidecarCommits(t *testing.T) {
+	setGitIdentity(t)
+
+	ctx := context.Background()
+	remote := newBareRepo(t)
+	root := newMainRepo(t)
+	bootstrapRepo(t, root, singleNamespaceConfig(remote, "project", []string{"**/SPEC.md"}))
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth\n")
+
+	service := sidecar.New(&gitexec.ExecRunner{})
+	if _, err := service.Sync(ctx, root, sidecar.SyncOptions{}); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	sidecarDir := filepath.Join(root, sidecar.DirName)
+	writeFile(t, sidecarDir, "project/rogue/SPEC.md", "# Rogue\n")
+	git(t, sidecarDir, "add", "project/rogue/SPEC.md")
+	git(t, sidecarDir, "commit", "-m", "rogue local sidecar commit")
+	writeFile(t, root, "src/auth/SPEC.md", "# Auth v2\n")
+
+	_, err := service.Push(ctx, root, sidecar.SyncOptions{})
+	if err == nil || !strings.Contains(err.Error(), "local commits outside expected push base") {
+		t.Fatalf("expected local sidecar commit rejection, got %v", err)
+	}
+	assertSidecarMissing(t, remote, "project/__branches__/main", "project/rogue/SPEC.md")
 }
 
 func TestServiceStatusReportsRemoteState(t *testing.T) {

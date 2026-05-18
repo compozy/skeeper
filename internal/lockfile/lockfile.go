@@ -87,7 +87,7 @@ func (s *JSONStore) Load(root reconcile.RepoRoot) (Lock, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return Lock{}, fmt.Errorf("%s not found; run `skeeper sync`", Filename)
+			return Lock{}, fmt.Errorf("%s not found; run `skeeper sync`: %w", Filename, err)
 		}
 		return Lock{}, fmt.Errorf("read %s: %w", Filename, err)
 	}

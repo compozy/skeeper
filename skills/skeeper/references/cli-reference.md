@@ -18,6 +18,8 @@ skeeper status
 skeeper pull
 skeeper push
 skeeper sync
+skeeper diff
+skeeper reconcile
 skeeper restore
 skeeper track
 skeeper untrack
@@ -54,13 +56,13 @@ Show sidecar URL, source branch, lock state, hook health, per-namespace counts, 
 | `--check` | Exit non-zero when Skeeper health requires action |
 | `--paths` | Include path-level drift details in text and JSON |
 
-Path classes include `unchanged`, `missing_local`, `local_only`, `local_modified`, `sidecar_modified`, `both_modified_conflict`, `namespace_removed`, and `config_unowned`.
+Path classes include `unchanged`, `missing_local`, `local_only`, `local_deleted`, `remote_deleted`, `local_modified`, `sidecar_modified`, `both_modified_conflict`, `local_delete_conflict`, `remote_delete_conflict`, `namespace_removed`, and `config_unowned`.
 
 `status --check --json` is the CI-friendly lock/sidecar/hook health check.
 
 ## `skeeper pull`
 
-Fetch sidecar refs, materialize remote docs into the working tree, preserve local-only docs, and update `skeeper.lock` when the pull succeeds. By default it also fast-forwards the main repository when safe.
+Fetch sidecar refs, materialize remote docs into the working tree, apply safe remote deletes, preserve local-only docs, and update `skeeper.lock` when the pull succeeds. By default it also fast-forwards the main repository when safe.
 
 | Flag       | Description                                 |
 | ---------- | ------------------------------------------- |
@@ -71,7 +73,7 @@ Use `pull` when another clone has published docs and this worktree needs them lo
 
 ## `skeeper push`
 
-Publish local managed docs into the sidecar, write `skeeper.lock`, and stage the lockfile. Default push is non-destructive: remote-only sidecar files are preserved.
+Publish local managed docs and safe local deletes into the sidecar, write `skeeper.lock`, and stage the lockfile. Push rejects sidecar branches whose remote tip does not match the local lock; run `skeeper pull` or `skeeper sync` first.
 
 | Flag              | Description                                              |
 | ----------------- | -------------------------------------------------------- |
@@ -82,11 +84,11 @@ Publish local managed docs into the sidecar, write `skeeper.lock`, and stage the
 | `--force`         | Allow plans that exceed `settings.guardrails`            |
 | `--prune`         | Explicitly delete remote-only files absent locally       |
 
-Use `--prune` only when the local set is intentionally authoritative.
+Use `--prune` only when the local set is intentionally authoritative and remote-only files do not have a trusted local deletion base.
 
 ## `skeeper sync`
 
-Run a sidecar pull, then a push, so disjoint docs from multiple clones converge to the union.
+Run a sidecar pull, then a push, so disjoint additions converge and safe deletes propagate across clones.
 
 | Flag              | Description                                              |
 | ----------------- | -------------------------------------------------------- |
@@ -111,6 +113,30 @@ skeeper sync
 git commit -m "skeeper: sync docs"
 git push
 ```
+
+## `skeeper diff`
+
+Show the path-level lock/worktree/base comparison without mutating files.
+
+| Flag                 | Description                                      |
+| -------------------- | ------------------------------------------------ |
+| `--json`             | Write machine-readable output                    |
+| `--namespace <name>` | Show one namespace                               |
+| `--class <class>`    | Filter to one class; repeat for multiple classes |
+
+## `skeeper reconcile`
+
+Resolve explicit local/sidecar drift after inspecting `status --paths` or `diff`.
+
+| Flag            | Description                                                    |
+| --------------- | -------------------------------------------------------------- |
+| `--dry-run`     | Show the reconciliation without writing files                  |
+| `--json`        | Write machine-readable output                                  |
+| `--adopt-local` | Publish local-only or local-modified files to the sidecar      |
+| `--prune-local` | Move local-only files to rescue storage                        |
+| `--merge`       | Write conflict markers for both-modified files                 |
+| `--ours`        | Resolve conflicts in favor of local files or local deletions   |
+| `--theirs`      | Resolve conflicts in favor of sidecar files or sidecar deletes |
 
 ## `skeeper restore`
 

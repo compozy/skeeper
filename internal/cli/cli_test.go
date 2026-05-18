@@ -3,6 +3,7 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/compozy/skeeper/internal/cli"
 	"github.com/compozy/skeeper/internal/config"
 	"github.com/compozy/skeeper/internal/gitexec"
+	"github.com/compozy/skeeper/internal/reconcile"
 	"github.com/compozy/skeeper/internal/sidecar"
 )
 
@@ -53,6 +55,8 @@ func TestExecute_HelpListsSidecarCommands(t *testing.T) {
 			"push",
 			"sync",
 			"restore",
+			"diff",
+			"reconcile",
 			"track",
 			"untrack",
 			"repair",
@@ -69,8 +73,6 @@ func TestExecute_HelpListsSidecarCommands(t *testing.T) {
 		for _, removed := range []string{
 			"hydrate",
 			"resolve",
-			"reconcile",
-			"diff",
 			"adopt",
 			"pattern",
 			"fsck",
@@ -95,6 +97,8 @@ func TestExecute_SubcommandHelp(t *testing.T) {
 		{"pull"},
 		{"push"},
 		{"restore"},
+		{"diff"},
+		{"reconcile"},
 		{"track"},
 		{"untrack"},
 		{"repair"},
@@ -127,8 +131,6 @@ func TestExecute_RemovedCommandsAreNotPublic(t *testing.T) {
 	for _, command := range [][]string{
 		{"hydrate"},
 		{"resolve"},
-		{"reconcile"},
-		{"diff"},
 		{"adopt"},
 		{"pattern"},
 		{"fsck"},
@@ -255,6 +257,64 @@ func TestExecute_JSONCheckFailuresReturnNonZero(t *testing.T) {
 				t.Fatalf("expected JSON failure body, got stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
 		})
+	}
+}
+
+func TestExecute_DiffJSONFiltersByClass(t *testing.T) {
+	root := setupCLISkeeperProject(t)
+	t.Chdir(root)
+	if err := os.Remove(filepath.Join(root, "src/auth/SPEC.md")); err != nil {
+		t.Fatalf("remove spec: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Execute(context.Background(), []string{"diff", "--json", "--class", "local_deleted"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d (stderr=%q)", code, stderr.String())
+	}
+	var summary reconcile.DiffSummary
+	if err := json.Unmarshal(stdout.Bytes(), &summary); err != nil {
+		t.Fatalf("decode diff JSON: %v\n%s", err, stdout.String())
+	}
+	if summary.Counts.LocalDeleted != 1 || summary.Counts.Unchanged != 0 {
+		t.Fatalf("expected only one local_deleted path, got %#v", summary.Counts)
+	}
+	if len(summary.Namespaces) != 1 || len(summary.Namespaces[0].Paths) != 1 {
+		t.Fatalf("expected one filtered path, got %#v", summary.Namespaces)
+	}
+	path := summary.Namespaces[0].Paths[0]
+	if path.Path != "src/auth/SPEC.md" || path.Class != reconcile.PathLocalDeleted {
+		t.Fatalf("unexpected filtered path: %#v", path)
+	}
+}
+
+func TestExecute_DiffRejectsUnknownClass(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cli.Execute(context.Background(), []string{"diff", "--class", "not_a_class"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit code, stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unknown path class") {
+		t.Fatalf("expected class validation error, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestExecute_ReconcileBlockedMutationReturnsNonZeroWithPlan(t *testing.T) {
+	root := setupCLISkeeperProject(t)
+	t.Chdir(root)
+	writeCLITestFile(t, root, "src/payments/SPEC.md", "# Local Only\n")
+
+	var stdout, stderr bytes.Buffer
+	code := cli.Execute(context.Background(), []string{"reconcile", "--merge"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit code, stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "skeeper: reconcile blocked") ||
+		!strings.Contains(stdout.String(), "extra=1") {
+		t.Fatalf("expected blocked plan on stdout, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "skeeper reconcile blocked") {
+		t.Fatalf("expected blocked error on stderr, got stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 

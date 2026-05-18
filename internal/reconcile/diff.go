@@ -11,9 +11,13 @@ const (
 	PathUnchanged            PathClass = "unchanged"
 	PathMissingLocal         PathClass = "missing_local"
 	PathLocalOnly            PathClass = "local_only"
+	PathLocalDeleted         PathClass = "local_deleted"
+	PathRemoteDeleted        PathClass = "remote_deleted"
 	PathLocalModified        PathClass = "local_modified"
 	PathSidecarModified      PathClass = "sidecar_modified"
 	PathBothModifiedConflict PathClass = "both_modified_conflict"
+	PathLocalDeleteConflict  PathClass = "local_delete_conflict"
+	PathRemoteDeleteConflict PathClass = "remote_delete_conflict"
 	PathNamespaceRemoved     PathClass = "namespace_removed"
 	PathConfigUnowned        PathClass = "config_unowned"
 )
@@ -69,9 +73,13 @@ type ClassCount struct {
 	Unchanged            int `json:"unchanged"`
 	MissingLocal         int `json:"missing_local"`
 	LocalOnly            int `json:"local_only"`
+	LocalDeleted         int `json:"local_deleted"`
+	RemoteDeleted        int `json:"remote_deleted"`
 	LocalModified        int `json:"local_modified"`
 	SidecarModified      int `json:"sidecar_modified"`
 	BothModifiedConflict int `json:"both_modified_conflict"`
+	LocalDeleteConflict  int `json:"local_delete_conflict"`
+	RemoteDeleteConflict int `json:"remote_delete_conflict"`
 	NamespaceRemoved     int `json:"namespace_removed"`
 	ConfigUnowned        int `json:"config_unowned"`
 }
@@ -111,6 +119,9 @@ func BuildNamespaceDiff(input NamespaceDiffInput) NamespaceDiff {
 		diff.ActualFiles++
 		diff.ActualBytes += file.Size
 	}
+	for path := range input.Base {
+		paths[path] = struct{}{}
+	}
 	ordered := make([]string, 0, len(paths))
 	for path := range paths {
 		ordered = append(ordered, path)
@@ -142,9 +153,13 @@ func SummarizeDiff(namespaces []NamespaceDiff) DiffSummary {
 		addCounts(&summary.Counts, namespace.Counts)
 		if namespace.Counts.MissingLocal != 0 ||
 			namespace.Counts.LocalOnly != 0 ||
+			namespace.Counts.LocalDeleted != 0 ||
+			namespace.Counts.RemoteDeleted != 0 ||
 			namespace.Counts.LocalModified != 0 ||
 			namespace.Counts.SidecarModified != 0 ||
 			namespace.Counts.BothModifiedConflict != 0 ||
+			namespace.Counts.LocalDeleteConflict != 0 ||
+			namespace.Counts.RemoteDeleteConflict != 0 ||
 			namespace.Counts.NamespaceRemoved != 0 ||
 			namespace.Counts.ConfigUnowned != 0 {
 			summary.OK = false
@@ -180,16 +195,24 @@ func classifyPath(
 	hasBase bool,
 ) PathClass {
 	switch {
-	case hasLocked && hasLocal && locked.SHA256 == local.SHA256:
+	case hasLocked && hasLocal:
+		return classifyPresentPath(locked, local, base, hasBase)
+	case hasLocked:
+		return classifyLocalAbsentPath(locked, base, hasBase)
+	case hasLocal:
+		return classifySidecarAbsentPath(local, base, hasBase)
+	case hasBase:
 		return PathUnchanged
-	case hasLocked && !hasLocal:
-		return PathMissingLocal
-	case !hasLocked && hasLocal:
-		return PathLocalOnly
-	case !hasLocked && !hasLocal:
+	default:
 		return PathConfigUnowned
 	}
-	if !hasBase || base.SHA256 == "" {
+}
+
+func classifyPresentPath(locked SnapshotFile, local SnapshotFile, base BaseFile, hasBase bool) PathClass {
+	if locked.SHA256 == local.SHA256 {
+		return PathUnchanged
+	}
+	if !hasComparableBase(base, hasBase) {
 		return PathLocalModified
 	}
 	localChanged := local.SHA256 != base.SHA256
@@ -202,6 +225,30 @@ func classifyPath(
 	default:
 		return PathLocalModified
 	}
+}
+
+func classifyLocalAbsentPath(locked SnapshotFile, base BaseFile, hasBase bool) PathClass {
+	if !hasComparableBase(base, hasBase) {
+		return PathMissingLocal
+	}
+	if locked.SHA256 == base.SHA256 {
+		return PathLocalDeleted
+	}
+	return PathLocalDeleteConflict
+}
+
+func classifySidecarAbsentPath(local SnapshotFile, base BaseFile, hasBase bool) PathClass {
+	if !hasComparableBase(base, hasBase) {
+		return PathLocalOnly
+	}
+	if local.SHA256 == base.SHA256 {
+		return PathRemoteDeleted
+	}
+	return PathRemoteDeleteConflict
+}
+
+func hasComparableBase(base BaseFile, hasBase bool) bool {
+	return hasBase && base.SHA256 != ""
 }
 
 func fileSide(file SnapshotFile, ok bool) *FileSide {
@@ -226,12 +273,20 @@ func incrementClass(counts *ClassCount, class PathClass) {
 		counts.MissingLocal++
 	case PathLocalOnly:
 		counts.LocalOnly++
+	case PathLocalDeleted:
+		counts.LocalDeleted++
+	case PathRemoteDeleted:
+		counts.RemoteDeleted++
 	case PathLocalModified:
 		counts.LocalModified++
 	case PathSidecarModified:
 		counts.SidecarModified++
 	case PathBothModifiedConflict:
 		counts.BothModifiedConflict++
+	case PathLocalDeleteConflict:
+		counts.LocalDeleteConflict++
+	case PathRemoteDeleteConflict:
+		counts.RemoteDeleteConflict++
 	case PathNamespaceRemoved:
 		counts.NamespaceRemoved++
 	case PathConfigUnowned:
@@ -243,9 +298,13 @@ func addCounts(total *ClassCount, next ClassCount) {
 	total.Unchanged += next.Unchanged
 	total.MissingLocal += next.MissingLocal
 	total.LocalOnly += next.LocalOnly
+	total.LocalDeleted += next.LocalDeleted
+	total.RemoteDeleted += next.RemoteDeleted
 	total.LocalModified += next.LocalModified
 	total.SidecarModified += next.SidecarModified
 	total.BothModifiedConflict += next.BothModifiedConflict
+	total.LocalDeleteConflict += next.LocalDeleteConflict
+	total.RemoteDeleteConflict += next.RemoteDeleteConflict
 	total.NamespaceRemoved += next.NamespaceRemoved
 	total.ConfigUnowned += next.ConfigUnowned
 }
