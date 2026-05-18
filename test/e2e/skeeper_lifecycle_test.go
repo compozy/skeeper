@@ -20,7 +20,7 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 	env.run(project, "skeeper",
 		"init",
 		"--sidecar-name", "project-specs",
-		"--bootstrap", "brew install compozy/skeeper/skeeper",
+		"--bootstrap", "brew install compozy/compozy/skeeper",
 		"--patterns", "**/SPEC.md",
 	)
 	env.assertContainsFile(filepath.Join(project, ".skeeper.yml"), "bootstrap: brew install")

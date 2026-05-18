@@ -158,9 +158,11 @@ sboms:
   - id: source
     artifacts: source
 
-# Homebrew cask configuration
-homebrew_casks:
+# Homebrew formula configuration
+brews:
   - name: skeeper
+    ids:
+      - skeeper-archive
     repository:
       owner: compozy
       name: homebrew-compozy
@@ -171,12 +173,15 @@ homebrew_casks:
       name: goreleaserbot
       email: bot@goreleaser.com
 
-    commit_msg_template: "Brew cask update for {{ .ProjectName }} version {{ .Tag }}"
-    directory: Casks
+    commit_msg_template: "Brew formula update for {{ .ProjectName }} version {{ .Tag }}"
+    directory: Formula
     caveats: |
       To get started with skeeper, see https://github.com/compozy/skeeper
     homepage: "https://github.com/compozy/skeeper"
     description: "Sidecar Git versioning for spec artifacts"
+    license: MIT
+    test: |
+      system "#{bin}/skeeper", "version"
     skip_upload: auto
 
 # NPM package configuration

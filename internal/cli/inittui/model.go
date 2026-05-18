@@ -131,7 +131,7 @@ func projectSettingsGroup(state *formState) *huh.Group {
 			Validate(validateNamespace),
 		huh.NewInput().
 			Title("Bootstrap").
-			Placeholder("brew install compozy/skeeper/skeeper").
+			Placeholder("brew install compozy/compozy/skeeper").
 			Value(&state.bootstrap),
 		huh.NewConfirm().
 			Title("Sync extra context folders?").

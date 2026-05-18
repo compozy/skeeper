@@ -46,8 +46,7 @@ It mirrors `SPEC.md`, ADRs, RFCs, and AI plan files into a sidecar Git repositor
 #### Homebrew
 
 ```bash
-brew tap compozy/compozy
-brew install --cask skeeper
+brew install compozy/compozy/skeeper
 ```
 
 #### NPM
