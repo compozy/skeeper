@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -27,6 +29,22 @@ type ExecRunner struct{}
 
 var _ Runner = (*ExecRunner)(nil)
 
+var gitRepositoryEnv = map[string]struct{}{
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": {},
+	"GIT_COMMON_DIR":                   {},
+	"GIT_DIR":                          {},
+	"GIT_GRAFT_FILE":                   {},
+	"GIT_IMPLICIT_WORK_TREE":           {},
+	"GIT_INDEX_FILE":                   {},
+	"GIT_NAMESPACE":                    {},
+	"GIT_NO_REPLACE_OBJECTS":           {},
+	"GIT_OBJECT_DIRECTORY":             {},
+	"GIT_PREFIX":                       {},
+	"GIT_REPLACE_REF_BASE":             {},
+	"GIT_SHALLOW_FILE":                 {},
+	"GIT_WORK_TREE":                    {},
+}
+
 // Run executes name with args in dir and returns stdout and stderr.
 func (r *ExecRunner) Run(ctx context.Context, dir, name string, args ...string) (Result, error) {
 	return r.RunWithInput(ctx, dir, "", name, args...)
@@ -42,6 +60,9 @@ func (r *ExecRunner) RunWithInput(
 ) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	if isGitCommand(name) {
+		cmd.Env = withoutGitRepositoryEnv(os.Environ())
+	}
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -67,6 +88,25 @@ func (r *ExecRunner) RunWithInput(
 		}
 	}
 	return result, nil
+}
+
+func isGitCommand(name string) bool {
+	base := filepath.Base(name)
+	return base == "git" || strings.EqualFold(base, "git.exe")
+}
+
+func withoutGitRepositoryEnv(env []string) []string {
+	cleaned := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, blocked := gitRepositoryEnv[key]; blocked {
+				continue
+			}
+		}
+		cleaned = append(cleaned, entry)
+	}
+	return cleaned
 }
 
 // CommandError wraps an external command failure with useful context.
