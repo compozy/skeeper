@@ -79,39 +79,41 @@ func TestSkeeperLifecycleAcrossRealGitClones(t *testing.T) {
 }
 
 func TestSkeeperPreCommitHookWorksInLinkedWorktree(t *testing.T) {
-	env := newE2EEnv(t)
-	project := env.newMainRepo("project")
-	env.run(project, "skeeper",
-		"init",
-		"--sidecar-name", "project-specs",
-		"--namespace", "project",
-		"--patterns", "**/SPEC.md",
-	)
-	env.writeFile(project, "README.md", "# project\n")
-	env.git(project, "add", "README.md", ".skeeper.yml", ".gitignore", ".gitattributes")
-	env.git(project, "commit", "-m", "bootstrap skeeper")
+	t.Run("Should sync spec changes from linked worktree pre-commit hook", func(t *testing.T) {
+		env := newE2EEnv(t)
+		project := env.newMainRepo("project")
+		env.run(project, "skeeper",
+			"init",
+			"--sidecar-name", "project-specs",
+			"--namespace", "project",
+			"--patterns", "**/SPEC.md",
+		)
+		env.writeFile(project, "README.md", "# project\n")
+		env.git(project, "add", "README.md", ".skeeper.yml", ".gitignore", ".gitattributes")
+		env.git(project, "commit", "-m", "bootstrap skeeper")
 
-	linked := filepath.Join(env.root, "linked-project")
-	env.git(project, "worktree", "add", "-b", "feature/docs", linked)
-	env.writeFile(linked, "src/auth/service.go", "package auth\n")
-	env.writeFile(linked, "src/auth/SPEC.md", "# Initial auth spec\n")
-	env.git(linked, "add", "src/auth/service.go")
-	env.git(linked, "commit", "-m", "auth: add linked worktree spec")
-	env.assertSidecarFile(
-		"project/__branches__/feature/docs",
-		"project/src/auth/SPEC.md",
-		"# Initial auth spec\n",
-	)
+		linked := filepath.Join(env.root, "linked-project")
+		env.git(project, "worktree", "add", "-b", "feature/docs", linked)
+		env.writeFile(linked, "src/auth/service.go", "package auth\n")
+		env.writeFile(linked, "src/auth/SPEC.md", "# Initial auth spec\n")
+		env.git(linked, "add", "src/auth/service.go")
+		env.git(linked, "commit", "-m", "auth: add linked worktree spec")
+		env.assertSidecarFile(
+			"project/__branches__/feature/docs",
+			"project/src/auth/SPEC.md",
+			"# Initial auth spec\n",
+		)
 
-	env.writeFile(linked, "src/auth/service.go", "package auth\n\nconst version = 2\n")
-	env.writeFile(linked, "src/auth/SPEC.md", "# Updated auth spec\n")
-	env.git(linked, "add", "src/auth/service.go")
-	env.git(linked, "commit", "-m", "auth: update linked worktree spec")
-	env.assertSidecarFile(
-		"project/__branches__/feature/docs",
-		"project/src/auth/SPEC.md",
-		"# Updated auth spec\n",
-	)
+		env.writeFile(linked, "src/auth/service.go", "package auth\n\nconst version = 2\n")
+		env.writeFile(linked, "src/auth/SPEC.md", "# Updated auth spec\n")
+		env.git(linked, "add", "src/auth/service.go")
+		env.git(linked, "commit", "-m", "auth: update linked worktree spec")
+		env.assertSidecarFile(
+			"project/__branches__/feature/docs",
+			"project/src/auth/SPEC.md",
+			"# Updated auth spec\n",
+		)
+	})
 }
 
 func TestSkeeperSharedSidecarNamespaceIsolationAcrossRepos(t *testing.T) {
