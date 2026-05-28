@@ -1,13 +1,6 @@
-## 0.3.1 - 2026-05-18
+## 0.3.2 - 2026-05-28
 
 
 ### 🐛 Bug Fixes
 
-- Homebrew tap
-
-- Pull and push operations
-
-
-### 🔧 CI/CD
-
-- Lint error
+- Isolate git commands from hook env (#27)
