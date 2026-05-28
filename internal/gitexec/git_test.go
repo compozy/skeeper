@@ -22,6 +22,41 @@ func TestExecRunnerCommandErrorCapturesExitCode(t *testing.T) {
 	}
 }
 
+func TestExecRunnerGitIgnoresInheritedLinkedWorktreeEnv(t *testing.T) {
+	t.Run("Should ignore inherited linked worktree env", func(t *testing.T) {
+		ctx := context.Background()
+		main := newRepo(t)
+		writeFile(t, main, "README.md", "project\n")
+		git(t, main, "add", "README.md")
+		git(t, main, "commit", "-m", "bootstrap")
+
+		linked := filepath.Join(t.TempDir(), "linked")
+		git(t, main, "worktree", "add", "-b", "feature", linked)
+
+		sidecar := newRepo(t)
+		writeFile(t, sidecar, "project/SPEC.md", "# Spec\n")
+		git(t, sidecar, "add", "project/SPEC.md")
+		git(t, sidecar, "commit", "-m", "sidecar")
+		remoteRef := "refs/remotes/origin/project/__branches__/feature"
+		want := gitOutput(t, sidecar, "rev-parse", "HEAD")
+		git(t, sidecar, "update-ref", remoteRef, want)
+
+		gitDir := gitOutput(t, linked, "rev-parse", "--absolute-git-dir")
+		t.Setenv("GIT_DIR", gitDir)
+		t.Setenv("GIT_WORK_TREE", linked)
+		t.Setenv("GIT_INDEX_FILE", filepath.Join(gitDir, "index"))
+		t.Setenv("GIT_PREFIX", "")
+
+		got, err := (&ExecRunner{}).Run(ctx, sidecar, "git", "rev-parse", remoteRef)
+		if err != nil {
+			t.Fatalf("rev-parse sidecar ref with inherited hook env: %v", err)
+		}
+		if TrimmedStdout(got) != want {
+			t.Fatalf("sidecar ref mismatch: got %q want %q", TrimmedStdout(got), want)
+		}
+	})
+}
+
 func TestGitLocalOperationsWithGoGit(t *testing.T) {
 	t.Parallel()
 
