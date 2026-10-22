@@ -1,13 +1,11 @@
-## 0.3.1 - 2026-05-18
+## 0.3.2 - 2026-10-22
 
 
 ### 🐛 Bug Fixes
 
-- Homebrew tap
-
-- Pull and push operations
+- Isolate git commands from hook env (#27)
 
 
-### 🔧 CI/CD
+### 📦 Build System
 
-- Lint error
+- Bump Bun to 1.4.4 for CVE-2026-111497 (#29)
