@@ -26,7 +26,7 @@ This file provides project guidance for coding agents working in this repository
 
 **skeeper** is a single-binary Go command-line interface built with production-grade patterns and agent-ready tooling. The CLI is structured around `cobra` and exposes subcommands wired through `internal/cli`.
 
-**Toolchain pin:** Go **1.26.2** (managed via `mise.toml` + `.go-version`), Bun **1.3.4** (`.bun-version`), `golangci-lint v2.11.4`, `gotestsum v1.13.0`, `gopls/modernize v0.21.1`, `goreleaser v2.6.1`. Run `mise install` to provision everything.
+**Toolchain pin:** Go **1.26.2** (managed via `mise.toml` + `.go-version`), Bun **1.4.4** (`.bun-version`), `golangci-lint v2.11.4`, `gotestsum v1.13.0`, `gopls/modernize v0.21.1`, `goreleaser v2.6.1`. Run `mise install` to provision everything.
 
 ## Package Layout
 
