@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CGO_ENABLED: 0
-  BUN_VERSION: "1.3.4"
+  BUN_VERSION: "1.4.4"
 
 permissions:
   contents: read
